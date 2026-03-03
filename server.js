@@ -178,6 +178,11 @@ const AOI_EDGE_CADENCE = Math.max(AOI_FAR_CADENCE, cadenceFromHz(TRACK_INTEREST_
 const AOI_NEAR_RADIUS_SQ = AOI_NEAR_RADIUS * AOI_NEAR_RADIUS;
 const AOI_MID_RADIUS_SQ = AOI_MID_RADIUS * AOI_MID_RADIUS;
 const AOI_FAR_RADIUS_SQ = AOI_FAR_RADIUS * AOI_FAR_RADIUS;
+const AOI_BUCKET_CELL_SIZE = Math.max(
+  40,
+  Number(TRACK_INTEREST_CONFIG?.bucketCellSize) || Math.max(48, Math.round(AOI_MID_RADIUS * 0.75))
+);
+const AOI_BUCKET_RANGE = Math.max(1, Math.ceil(AOI_FAR_RADIUS / AOI_BUCKET_CELL_SIZE));
 
 const DELTA_POS_SCALE = 100;
 const DELTA_ROT_SCALE = 1000;
@@ -1883,6 +1888,14 @@ function resolveAoiCadence(distanceSq) {
   return AOI_EDGE_CADENCE;
 }
 
+function toAoiBucketCoord(value) {
+  return Math.floor((Number(value) || 0) / AOI_BUCKET_CELL_SIZE);
+}
+
+function toAoiBucketKey(cellX, cellZ) {
+  return `${cellX}:${cellZ}`;
+}
+
 function buildPackedRemoteState(player, state = null) {
   const resolvedState = state ?? player?.state ?? {};
   return {
@@ -1907,6 +1920,7 @@ function emitRoomDeltaSnapshot(room) {
   const activePlayerIds = new Set();
   const playerKinematics = new Map();
   const packedStates = new Map();
+  const aoiBuckets = new Map();
 
   for (const player of players) {
     if (!player?.id) {
@@ -1915,13 +1929,24 @@ function emitRoomDeltaSnapshot(room) {
     const state = player.state ?? sanitizePlayerState();
     const px = Number(state?.x) || 0;
     const pz = Number(state?.z) || 0;
+    const cellX = toAoiBucketCoord(px);
+    const cellZ = toAoiBucketCoord(pz);
     activePlayerIds.add(player.id);
     playerKinematics.set(player.id, {
       state,
       x: px,
-      z: pz
+      z: pz,
+      cellX,
+      cellZ
     });
     packedStates.set(player.id, buildPackedRemoteState(player, state));
+    const bucketKey = toAoiBucketKey(cellX, cellZ);
+    let bucket = aoiBuckets.get(bucketKey);
+    if (!bucket) {
+      bucket = [];
+      aoiBuckets.set(bucketKey, bucket);
+    }
+    bucket.push(player.id);
   }
 
   for (const receiver of players) {
@@ -1938,11 +1963,31 @@ function emitRoomDeltaSnapshot(room) {
     const updates = [];
     const removals = [];
     const receiverKinematics = playerKinematics.get(receiver.id);
+    if (!receiverKinematics) {
+      continue;
+    }
     const receiverX = Number(receiverKinematics?.x) || 0;
     const receiverZ = Number(receiverKinematics?.z) || 0;
+    const candidateIds = new Set();
 
-    for (const remote of players) {
-      if (!remote || remote.id === receiver.id) {
+    for (let dz = -AOI_BUCKET_RANGE; dz <= AOI_BUCKET_RANGE; dz += 1) {
+      for (let dx = -AOI_BUCKET_RANGE; dx <= AOI_BUCKET_RANGE; dx += 1) {
+        const bucketKey = toAoiBucketKey(receiverKinematics.cellX + dx, receiverKinematics.cellZ + dz);
+        const bucket = aoiBuckets.get(bucketKey);
+        if (!bucket || bucket.length <= 0) {
+          continue;
+        }
+        for (const remoteId of bucket) {
+          if (remoteId !== receiver.id) {
+            candidateIds.add(remoteId);
+          }
+        }
+      }
+    }
+
+    for (const remoteId of candidateIds) {
+      const remote = room.players.get(remoteId);
+      if (!remote) {
         continue;
       }
 
@@ -1952,6 +1997,9 @@ function emitRoomDeltaSnapshot(room) {
       const dx = remoteX - receiverX;
       const dz = remoteZ - receiverZ;
       const distanceSq = dx * dx + dz * dz;
+      if (distanceSq > AOI_FAR_RADIUS_SQ) {
+        continue;
+      }
       const cadence = resolveAoiCadence(distanceSq);
 
       const cached = cache.get(remote.id) ?? null;
@@ -2005,7 +2053,20 @@ function emitRoomDeltaSnapshot(room) {
     }
 
     for (const cachedId of Array.from(cache.keys())) {
-      if (!activePlayerIds.has(cachedId)) {
+      if (!activePlayerIds.has(cachedId) || !candidateIds.has(cachedId)) {
+        cache.delete(cachedId);
+        removals.push(cachedId);
+        continue;
+      }
+      const remoteKinematics = playerKinematics.get(cachedId);
+      if (!remoteKinematics) {
+        cache.delete(cachedId);
+        removals.push(cachedId);
+        continue;
+      }
+      const dx = Number(remoteKinematics.x) - receiverX;
+      const dz = Number(remoteKinematics.z) - receiverZ;
+      if (dx * dx + dz * dz > AOI_FAR_RADIUS_SQ) {
         cache.delete(cachedId);
         removals.push(cachedId);
       }

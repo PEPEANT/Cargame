@@ -105,7 +105,12 @@ export class GameRuntime {
       antialias: !this.mobileEnabled,
       powerPreference: "high-performance"
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.mobileEnabled ? 1.4 : 1.6));
+    const devicePixelRatio = Math.max(1, Number(window.devicePixelRatio) || 1);
+    this.maxPixelRatio = Math.min(devicePixelRatio, this.mobileEnabled ? 1.4 : 1.6);
+    this.minPixelRatio = Math.min(this.maxPixelRatio, this.mobileEnabled ? 0.75 : 0.9);
+    this.currentPixelRatio = this.maxPixelRatio;
+    this.lastQualityAdjustAt = 0;
+    this.renderer.setPixelRatio(this.currentPixelRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -140,6 +145,7 @@ export class GameRuntime {
     this.currentRoomCode = "";
     this.ownerAccessEnabled = resolveOwnerAccess();
     this.remotePlayers = new Map();
+    this.remoteMeshPool = [];
     this.remoteMaterial = new THREE.MeshStandardMaterial({
       color: 0x77c8ff,
       roughness: 0.55,
@@ -1046,8 +1052,15 @@ export class GameRuntime {
     if (this.remotePlayers.has(id)) {
       return this.remotePlayers.get(id);
     }
-    const mesh = createRemoteMesh(this.remoteMaterial);
-    this.scene.add(mesh);
+    let mesh = this.remoteMeshPool.pop();
+    if (!mesh) {
+      mesh = createRemoteMesh(this.remoteMaterial);
+      this.scene.add(mesh);
+    } else {
+      mesh.visible = true;
+      mesh.position.set(0, 0, 0);
+      mesh.rotation.set(0, 0, 0);
+    }
     const remote = {
       id,
       mesh,
@@ -1070,7 +1083,8 @@ export class GameRuntime {
       return;
     }
     if (remote.mesh) {
-      this.scene.remove(remote.mesh);
+      remote.mesh.visible = false;
+      this.remoteMeshPool.push(remote.mesh);
     }
     this.remotePlayers.delete(key);
   }
@@ -1221,8 +1235,7 @@ export class GameRuntime {
         continue;
       }
       if (now - Number(remote.lastUpdateAt || now) > staleAfterMs) {
-        this.scene.remove(remote.mesh);
-        this.remotePlayers.delete(id);
+        this.removeRemotePlayer(id);
         continue;
       }
       const stalenessSeconds = Math.max(0, (now - Number(remote.lastUpdateAt || now)) / 1000);
@@ -1233,6 +1246,30 @@ export class GameRuntime {
         Math.atan2(Math.sin(remote.targetYaw - remote.mesh.rotation.y), Math.cos(remote.targetYaw - remote.mesh.rotation.y)) *
         clamp(delta * 11, 0.04, 0.65);
     }
+  }
+
+  maybeAdjustDynamicResolution() {
+    const fps = Number(this.hudFpsSmoothed);
+    if (!Number.isFinite(fps) || fps <= 0) {
+      return;
+    }
+    const now = performance.now();
+    if (now - Number(this.lastQualityAdjustAt || 0) < 1400) {
+      return;
+    }
+    let next = this.currentPixelRatio;
+    if (fps < 44 && this.currentPixelRatio > this.minPixelRatio + 0.01) {
+      next = Math.max(this.minPixelRatio, this.currentPixelRatio - (this.mobileEnabled ? 0.08 : 0.1));
+    } else if (fps > 58 && this.currentPixelRatio < this.maxPixelRatio - 0.01) {
+      next = Math.min(this.maxPixelRatio, this.currentPixelRatio + 0.05);
+    }
+    if (Math.abs(next - this.currentPixelRatio) < 0.01) {
+      return;
+    }
+    this.currentPixelRatio = Number(next.toFixed(3));
+    this.renderer.setPixelRatio(this.currentPixelRatio);
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+    this.lastQualityAdjustAt = now;
   }
 
   tick(delta) {
@@ -1246,6 +1283,7 @@ export class GameRuntime {
       this.hudFpsSmoothed = this.hudFpsFrameCounter / Math.max(this.hudFpsSampleClock, 0.0001);
       this.hudFpsSampleClock = 0;
       this.hudFpsFrameCounter = 0;
+      this.maybeAdjustDynamicResolution();
     }
 
     this.hudRefreshClock += delta;
