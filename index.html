@@ -10,6 +10,16 @@
   </head>
   <body>
     <div id="app"></div>
+    <button id="fullscreen-toggle" type="button" aria-pressed="false">전체화면</button>
+    <button id="graphics-toggle" type="button" aria-pressed="false">그래픽: 기본</button>
+    <div id="graphics-controls" class="hidden" role="dialog" aria-label="그래픽 품질 설정">
+      <label for="graphics-quality-select">그래픽 품질</label>
+      <select id="graphics-quality-select">
+        <option value="low">낮음</option>
+        <option value="medium">기본</option>
+        <option value="high">높음</option>
+      </select>
+    </div>
     <div id="orientation-lock-overlay" class="hidden" aria-live="polite" aria-hidden="true">
       <div class="orientation-lock-panel">
         <h2>가로로 돌려주세요</h2>

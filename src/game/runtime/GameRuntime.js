@@ -81,6 +81,10 @@ export class GameRuntime {
     this.clock = new THREE.Clock();
     this.mobileEnabled = isLikelyTouchDevice();
     this.hud = new HUD();
+    this.graphicsPanelOpen = false;
+    this.graphicsQualityStorageKey = "graphicsQuality_v1";
+    this.graphicsQuality = this.loadGraphicsQualityPreference();
+    this.autoResolutionEnabled = true;
 
     this.contentPack = options.contentPack ?? getContentPack(options.contentPackId);
     this.worldContent = this.contentPack.world;
@@ -118,6 +122,7 @@ export class GameRuntime {
     this.renderer.toneMappingExposure = Number.isFinite(rendererExposure) ? rendererExposure : 1.02;
     this.renderer.shadowMap.enabled = !this.mobileEnabled;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.applyGraphicsQualityOverrides();
 
     this.playerPosition = new THREE.Vector3(0, GAME_CONSTANTS.PLAYER_HEIGHT, 0);
     this.playerVelocityY = 0;
@@ -191,6 +196,10 @@ export class GameRuntime {
     this.portalAdmitBtnEl = document.getElementById("portal-admit-btn");
     this.portalTargetInputEl = document.getElementById("portal-target-input");
     this.portalTargetSaveBtnEl = document.getElementById("portal-target-save-btn");
+    this.fullscreenToggleBtnEl = document.getElementById("fullscreen-toggle");
+    this.graphicsToggleBtnEl = document.getElementById("graphics-toggle");
+    this.graphicsControlsEl = document.getElementById("graphics-controls");
+    this.graphicsQualitySelectEl = document.getElementById("graphics-quality-select");
     this.raceControlsEl = document.getElementById("race-controls");
     this.raceControlsNoteEl = document.getElementById("race-controls-note");
     this.chatUiEl = document.getElementById("chat-ui");
@@ -200,11 +209,13 @@ export class GameRuntime {
     this.chatSendBtnEl = document.getElementById("chat-send-btn");
     this.chatHideBtnEl = document.getElementById("chat-hide-btn");
     this.chatCloseBtnEl = document.getElementById("chat-close-btn");
+    this.mobileChatPreviewEl = document.getElementById("mobile-chat-preview");
     this.mobileChatToggleBtnEl = document.getElementById("mobile-chat-toggle-btn");
     this.chatMuted = false;
     this.chatUnreadCount = 0;
     this.chatMaxEntries = 80;
     this.chatOpen = !this.mobileEnabled;
+    this.chatPreviewDismissTimer = null;
 
     this.boundLoop = this.loop.bind(this);
     this.boundResize = this.onResize.bind(this);
@@ -213,6 +224,8 @@ export class GameRuntime {
     this.boundKeyDown = this.onKeyDown.bind(this);
     this.boundKeyUp = this.onKeyUp.bind(this);
     this.boundPointerDown = this.onPointerDown.bind(this);
+    this.boundDocumentPointerDown = this.onDocumentPointerDown.bind(this);
+    this.boundFullscreenChange = this.onFullscreenChange.bind(this);
   }
 
   init() {
@@ -225,6 +238,8 @@ export class GameRuntime {
     this.bindRaceControls();
     this.bindChatUi();
     this.connectSocket();
+    this.updateFullscreenToggleState();
+    this.syncGraphicsControlsUi();
     this.updateRaceControlsVisibility();
     this.hud.setStatus("Booting race runtime");
     requestAnimationFrame(this.boundLoop);
@@ -432,9 +447,176 @@ export class GameRuntime {
     window.addEventListener("resize", this.boundResize);
     document.addEventListener("mousemove", this.boundMouseMove, { passive: true });
     document.addEventListener("pointerlockchange", this.boundPointerLock, { passive: true });
+    document.addEventListener("fullscreenchange", this.boundFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", this.boundFullscreenChange);
     document.addEventListener("keydown", this.boundKeyDown);
     document.addEventListener("keyup", this.boundKeyUp);
+    document.addEventListener("pointerdown", this.boundDocumentPointerDown);
     this.renderer.domElement.addEventListener("pointerdown", this.boundPointerDown);
+    this.fullscreenToggleBtnEl?.addEventListener("click", () => {
+      this.toggleFullscreenFromInteraction();
+    });
+    this.graphicsToggleBtnEl?.addEventListener("click", (event) => {
+      event.preventDefault();
+      this.graphicsPanelOpen = !this.graphicsPanelOpen;
+      this.syncGraphicsControlsUi();
+    });
+    this.graphicsQualitySelectEl?.addEventListener("change", () => {
+      this.setGraphicsQuality(this.graphicsQualitySelectEl.value, { persist: true });
+    });
+  }
+
+  onDocumentPointerDown(event) {
+    const target = event?.target;
+    if (!this.graphicsPanelOpen || !target) {
+      return;
+    }
+    const clickedGraphicsToggle =
+      this.graphicsToggleBtnEl &&
+      typeof this.graphicsToggleBtnEl.contains === "function" &&
+      this.graphicsToggleBtnEl.contains(target);
+    const clickedGraphicsPanel =
+      this.graphicsControlsEl &&
+      typeof this.graphicsControlsEl.contains === "function" &&
+      this.graphicsControlsEl.contains(target);
+    if (!clickedGraphicsToggle && !clickedGraphicsPanel) {
+      this.graphicsPanelOpen = false;
+      this.syncGraphicsControlsUi();
+    }
+  }
+
+  onFullscreenChange() {
+    this.updateFullscreenToggleState();
+  }
+
+  isFullscreenActive() {
+    return Boolean(document.fullscreenElement ?? document.webkitFullscreenElement);
+  }
+
+  updateFullscreenToggleState() {
+    if (!this.fullscreenToggleBtnEl) {
+      return;
+    }
+    const fullscreen = this.isFullscreenActive();
+    this.fullscreenToggleBtnEl.textContent = fullscreen ? "전체화면 해제" : "전체화면";
+    this.fullscreenToggleBtnEl.setAttribute("aria-pressed", fullscreen ? "true" : "false");
+  }
+
+  async toggleFullscreenFromInteraction() {
+    const root = document.documentElement;
+    if (!root) {
+      return;
+    }
+    const requestFn = root.requestFullscreen ?? root.webkitRequestFullscreen;
+    const exitFn = document.exitFullscreen ?? document.webkitExitFullscreen;
+    try {
+      if (this.isFullscreenActive()) {
+        if (typeof exitFn === "function") {
+          await exitFn.call(document);
+        }
+      } else if (typeof requestFn === "function") {
+        await requestFn.call(root);
+      }
+    } catch {
+      // ignore and preserve current viewport state
+    } finally {
+      this.updateFullscreenToggleState();
+    }
+  }
+
+  normalizeGraphicsQuality(rawQuality) {
+    const quality = String(rawQuality ?? "").trim().toLowerCase();
+    if (quality === "low" || quality === "high") {
+      return quality;
+    }
+    return "medium";
+  }
+
+  loadGraphicsQualityPreference() {
+    try {
+      const saved = localStorage.getItem(this.graphicsQualityStorageKey);
+      return this.normalizeGraphicsQuality(saved);
+    } catch {
+      return "medium";
+    }
+  }
+
+  saveGraphicsQualityPreference() {
+    try {
+      localStorage.setItem(this.graphicsQualityStorageKey, this.graphicsQuality);
+    } catch {
+      // ignore persistence errors
+    }
+  }
+
+  applyGraphicsQualityOverrides() {
+    const quality = this.normalizeGraphicsQuality(this.graphicsQuality);
+    this.graphicsQuality = quality;
+    const devicePixelRatio = Math.max(1, Number(window.devicePixelRatio) || 1);
+    let maxRatioCap = this.mobileEnabled ? 1.25 : 1.6;
+    let minRatio = this.mobileEnabled ? 0.72 : 0.88;
+    let dynamicEnabled = true;
+
+    if (quality === "low") {
+      maxRatioCap = this.mobileEnabled ? 0.95 : 1.0;
+      minRatio = this.mobileEnabled ? 0.55 : 0.68;
+      dynamicEnabled = true;
+    } else if (quality === "high") {
+      maxRatioCap = this.mobileEnabled ? 1.35 : 1.9;
+      minRatio = this.mobileEnabled ? 0.86 : 1.0;
+      dynamicEnabled = false;
+    }
+
+    this.autoResolutionEnabled = dynamicEnabled;
+    this.maxPixelRatio = Math.min(devicePixelRatio, Math.max(0.7, maxRatioCap));
+    this.minPixelRatio = Math.min(this.maxPixelRatio, Math.max(0.5, minRatio));
+    this.currentPixelRatio = Number(
+      clamp(this.currentPixelRatio, this.minPixelRatio, this.maxPixelRatio).toFixed(3)
+    );
+    if (quality === "low") {
+      this.currentPixelRatio = this.minPixelRatio;
+    } else if (quality === "high") {
+      this.currentPixelRatio = this.maxPixelRatio;
+    }
+
+    this.renderer.shadowMap.enabled = !this.mobileEnabled && quality !== "low";
+    this.renderer.setPixelRatio(this.currentPixelRatio);
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+  }
+
+  setGraphicsQuality(rawQuality, { persist = true } = {}) {
+    const nextQuality = this.normalizeGraphicsQuality(rawQuality);
+    this.graphicsQuality = nextQuality;
+    if (persist) {
+      this.saveGraphicsQualityPreference();
+    }
+    this.applyGraphicsQualityOverrides();
+    this.syncGraphicsControlsUi();
+  }
+
+  syncGraphicsControlsUi() {
+    const quality = this.normalizeGraphicsQuality(this.graphicsQuality);
+    this.graphicsQuality = quality;
+    const blocked = this.mobileEnabled;
+    if (blocked && this.graphicsPanelOpen) {
+      this.graphicsPanelOpen = false;
+    }
+    const labelMap = {
+      high: "높음",
+      medium: "기본",
+      low: "낮음"
+    };
+    if (this.graphicsToggleBtnEl) {
+      this.graphicsToggleBtnEl.textContent = `그래픽: ${labelMap[quality] ?? "기본"}`;
+      this.graphicsToggleBtnEl.classList.toggle("hidden", blocked);
+      this.graphicsToggleBtnEl.setAttribute("aria-pressed", this.graphicsPanelOpen ? "true" : "false");
+    }
+    if (this.graphicsQualitySelectEl && this.graphicsQualitySelectEl.value !== quality) {
+      this.graphicsQualitySelectEl.value = quality;
+    }
+    if (this.graphicsControlsEl) {
+      this.graphicsControlsEl.classList.toggle("hidden", blocked || !this.graphicsPanelOpen);
+    }
   }
 
   bindRaceControls() {
@@ -543,6 +725,7 @@ export class GameRuntime {
       }
       if (this.chatOpen) {
         this.chatUnreadCount = 0;
+        this.clearMobileChatPreview();
       }
       this.updateMobileChatToggleState();
     });
@@ -551,6 +734,7 @@ export class GameRuntime {
       this.chatUiEl?.classList.toggle("mobile-chat-hidden", !this.chatOpen);
       if (this.chatOpen) {
         this.chatUnreadCount = 0;
+        this.clearMobileChatPreview();
         this.chatInputEl?.focus();
       } else {
         document.body.classList.remove("mobile-chat-focus");
@@ -560,6 +744,9 @@ export class GameRuntime {
   }
 
   updateMobileChatToggleState() {
+    if (!this.mobileEnabled || this.chatOpen) {
+      this.clearMobileChatPreview();
+    }
     if (!this.mobileChatToggleBtnEl) {
       return;
     }
@@ -572,7 +759,44 @@ export class GameRuntime {
     }
   }
 
-  appendChatLine(payload = {}, { system = false } = {}) {
+  clearMobileChatPreview() {
+    if (this.chatPreviewDismissTimer) {
+      clearTimeout(this.chatPreviewDismissTimer);
+      this.chatPreviewDismissTimer = null;
+    }
+    if (!this.mobileChatPreviewEl) {
+      return;
+    }
+    this.mobileChatPreviewEl.textContent = "";
+    this.mobileChatPreviewEl.classList.add("hidden");
+  }
+
+  appendMobileChatPreview(payload = {}) {
+    if (!this.mobileEnabled || this.chatOpen || !this.mobileChatPreviewEl) {
+      return;
+    }
+    const text = String(payload?.text ?? "").trim();
+    if (!text) {
+      return;
+    }
+    const name = String(payload?.name ?? "PLAYER").trim();
+    const line = document.createElement("p");
+    line.className = "mobile-chat-preview-line";
+    line.textContent = `${name}: ${text}`;
+    this.mobileChatPreviewEl.appendChild(line);
+    while (this.mobileChatPreviewEl.childElementCount > 4) {
+      this.mobileChatPreviewEl.removeChild(this.mobileChatPreviewEl.firstElementChild);
+    }
+    this.mobileChatPreviewEl.classList.remove("hidden");
+    if (this.chatPreviewDismissTimer) {
+      clearTimeout(this.chatPreviewDismissTimer);
+    }
+    this.chatPreviewDismissTimer = setTimeout(() => {
+      this.clearMobileChatPreview();
+    }, 4500);
+  }
+
+  appendChatLine(payload = {}, { system = false, trackUnread = true } = {}) {
     if (!this.chatLogEl) {
       return;
     }
@@ -597,8 +821,9 @@ export class GameRuntime {
     }
     this.chatLogEl.scrollTop = this.chatLogEl.scrollHeight;
 
-    if (this.mobileEnabled && !this.chatOpen && !system) {
+    if (trackUnread && this.mobileEnabled && !this.chatOpen && !system) {
       this.chatUnreadCount += 1;
+      this.appendMobileChatPreview(payload);
       this.updateMobileChatToggleState();
     }
   }
@@ -610,7 +835,7 @@ export class GameRuntime {
     this.chatLogEl.textContent = "";
     const history = Array.isArray(payload?.entries) ? payload.entries : [];
     for (const entry of history) {
-      this.appendChatLine(entry, { system: String(entry?.type ?? "") === "system" });
+      this.appendChatLine(entry, { system: String(entry?.type ?? "") === "system", trackUnread: false });
     }
   }
 
@@ -651,6 +876,8 @@ export class GameRuntime {
       this.assignedSeat = null;
       this.manualBoardInFlight = false;
       this.chatMuted = false;
+      this.chatUnreadCount = 0;
+      this.updateMobileChatToggleState();
       this.setSystemStatus(`Connected to ${this.socketEndpoint}`);
       this.socket.emit("room:list");
     });
@@ -666,6 +893,8 @@ export class GameRuntime {
       this.assignedSeat = null;
       this.manualBoardInFlight = false;
       this.chatMuted = false;
+      this.chatUnreadCount = 0;
+      this.updateMobileChatToggleState();
       this.currentRoomCode = "";
       this.clearRemotePlayers();
       this.setSystemStatus("Disconnected");
@@ -1131,6 +1360,12 @@ export class GameRuntime {
       }
       return;
     }
+    if (code === "Escape" && this.graphicsPanelOpen) {
+      event.preventDefault();
+      this.graphicsPanelOpen = false;
+      this.syncGraphicsControlsUi();
+      return;
+    }
     if (code === "Enter" && this.chatInputEl) {
       event.preventDefault();
       if (this.mobileEnabled && !this.chatOpen) {
@@ -1160,9 +1395,11 @@ export class GameRuntime {
   onResize() {
     const width = window.innerWidth;
     const height = window.innerHeight;
+    this.applyGraphicsQualityOverrides();
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+    this.syncGraphicsControlsUi();
   }
 
   setSystemStatus(text) {
@@ -1249,6 +1486,9 @@ export class GameRuntime {
   }
 
   maybeAdjustDynamicResolution() {
+    if (!this.autoResolutionEnabled) {
+      return;
+    }
     const fps = Number(this.hudFpsSmoothed);
     if (!Number.isFinite(fps) || fps <= 0) {
       return;
