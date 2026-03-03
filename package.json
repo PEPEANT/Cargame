@@ -19,20 +19,29 @@
     "prod:save": "npx pm2 save",
     "doctor": "node scripts/doctor.mjs",
     "audit:world": "node scripts/world-audit.mjs",
+    "audit:ox": "node scripts/audit-ox.mjs",
+    "audit:ox:strict": "node scripts/audit-ox.mjs --fail-on-hit",
+    "verify:remote": "node scripts/verify-remote-origin.mjs",
+    "verify:map-assets": "node scripts/verify-map-assets.mjs",
+    "verify:race-allocation": "node scripts/verify-race-allocation.mjs",
+    "check:race-ready": "node scripts/verify-race-ready.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "check": "node scripts/verify.mjs",
     "check:smoke": "node scripts/verify.mjs --skip-build",
     "check:gateway": "node scripts/verify-gateway.mjs",
     "check:scaleout": "node scripts/verify-scaleout.mjs",
-    "check:load50": "node scripts/loadtest-50.mjs"
+    "check:load50": "node scripts/loadtest-50.mjs",
+    "plan:race-grid": "node scripts/preview-race-grid.mjs 50"
   },
   "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
     "events": "^3.3.0",
     "simplex-noise": "^4.0.3",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
     "three": "^0.180.0",
+    "three-mesh-bvh": "^0.9.8",
     "voxel": "^0.5.0"
   },
   "devDependencies": {

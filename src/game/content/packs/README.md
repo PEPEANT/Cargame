@@ -8,6 +8,7 @@ Each pack should live in its own folder:
 Current pack:
 
 - `packs/base-void/pack.js`
+- `packs/car-race-alpha/pack.js` (rebuild scaffold)
 
 Compatibility note:
 

@@ -12,6 +12,22 @@ Current identity is intentionally simple:
 The project is now structured for expansion packs.
 New world variants can be added through `src/game/content/packs/`.
 
+## Car Rebuild Prep
+
+Car-racing rebuild planning and scaffolding are tracked in:
+
+- `docs/CAR_REBUILD_MASTER_PLAN.md`
+- `docs/CAR_MAP_REBUILD_PLAN.md`
+- `docs/CAR_OSS_INTAKE_PLAN.md`
+- `docs/CAR_TARGET_STRUCTURE.md`
+- `docs/CAR_ARCHITECTURE_OPINION_ADDENDUM.md`
+
+Quick spawn-grid preview for race staging:
+
+```bash
+npm run plan:race-grid
+```
+
 ## Quick Start
 
 Install dependencies:
@@ -56,6 +72,12 @@ Fast verification (no build):
 
 ```bash
 npm run check:smoke
+```
+
+Git remote safety check (must point to `PEPEANT/Cargame`):
+
+```bash
+npm run verify:remote
 ```
 
 Gateway -> worker redirect verification:

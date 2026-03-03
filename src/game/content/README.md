@@ -20,3 +20,7 @@ Example future packs:
 - `packs/desertVoidPack.js`
 - `packs/industrialVoidPack.js`
 - `packs/nightSkyPack.js`
+
+Current additional scaffold pack:
+
+- `packs/car-race-alpha/pack.js`

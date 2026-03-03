@@ -1,0 +1,88 @@
+OSS Source Manifest (tracks/oss)
+
+Status: IMPORTED
+Retrieved Date: 2026-03-03
+
+Upstreams:
+- Neon Town
+  - Author: leonkin
+  - Source URL: https://opengameart.org/content/neon-town
+  - Download URL: https://opengameart.org/sites/default/files/NeonTown.zip
+  - License: CC0 1.0 Universal (Public Domain)
+- Racing Kit (1.2)
+  - Author: Kenney
+  - Source URL: https://www.kenney.nl/assets/racing-kit
+  - Mirror Download URL: https://opengameart.org/sites/default/files/Racing%20Kit%20%281.2%29.zip
+  - License: CC0 1.0 Universal (Public Domain)
+
+Imported Files:
+- neontown/ground.glb
+- neontown/lamp.glb
+- neontown/traffic-light.glb
+- kenney-racing-kit/gltf/barrierRed.bin
+- kenney-racing-kit/gltf/barrierRed.gltf
+- kenney-racing-kit/gltf/barrierWall.bin
+- kenney-racing-kit/gltf/barrierWall.gltf
+- kenney-racing-kit/gltf/barrierWhite.bin
+- kenney-racing-kit/gltf/barrierWhite.gltf
+- kenney-racing-kit/gltf/checkers.png
+- kenney-racing-kit/gltf/fenceCurved.bin
+- kenney-racing-kit/gltf/fenceCurved.gltf
+- kenney-racing-kit/gltf/fenceStraight.bin
+- kenney-racing-kit/gltf/fenceStraight.gltf
+- kenney-racing-kit/gltf/flagCheckers.bin
+- kenney-racing-kit/gltf/flagCheckers.gltf
+- kenney-racing-kit/gltf/grandStand.bin
+- kenney-racing-kit/gltf/grandStand.gltf
+- kenney-racing-kit/gltf/grandStandCovered.bin
+- kenney-racing-kit/gltf/grandStandCovered.gltf
+- kenney-racing-kit/gltf/grass.bin
+- kenney-racing-kit/gltf/grass.gltf
+- kenney-racing-kit/gltf/lightRed.bin
+- kenney-racing-kit/gltf/lightRed.gltf
+- kenney-racing-kit/gltf/net.png
+- kenney-racing-kit/gltf/overhead.bin
+- kenney-racing-kit/gltf/overhead.gltf
+- kenney-racing-kit/gltf/pitsGarage.bin
+- kenney-racing-kit/gltf/pitsGarage.gltf
+- kenney-racing-kit/gltf/pitsOffice.bin
+- kenney-racing-kit/gltf/pitsOffice.gltf
+- kenney-racing-kit/gltf/pylon.bin
+- kenney-racing-kit/gltf/pylon.gltf
+- kenney-racing-kit/gltf/rail.bin
+- kenney-racing-kit/gltf/rail.gltf
+- kenney-racing-kit/gltf/roadCornerLarge.bin
+- kenney-racing-kit/gltf/roadCornerLarge.gltf
+- kenney-racing-kit/gltf/roadCornerSmall.bin
+- kenney-racing-kit/gltf/roadCornerSmall.gltf
+- kenney-racing-kit/gltf/roadCurved.bin
+- kenney-racing-kit/gltf/roadCurved.gltf
+- kenney-racing-kit/gltf/roadPitEntry.bin
+- kenney-racing-kit/gltf/roadPitEntry.gltf
+- kenney-racing-kit/gltf/roadPitGarage.bin
+- kenney-racing-kit/gltf/roadPitGarage.gltf
+- kenney-racing-kit/gltf/roadPitStraight.bin
+- kenney-racing-kit/gltf/roadPitStraight.gltf
+- kenney-racing-kit/gltf/roadSplit.bin
+- kenney-racing-kit/gltf/roadSplit.gltf
+- kenney-racing-kit/gltf/roadStart.bin
+- kenney-racing-kit/gltf/roadStart.gltf
+- kenney-racing-kit/gltf/roadStartPositions.bin
+- kenney-racing-kit/gltf/roadStartPositions.gltf
+- kenney-racing-kit/gltf/roadStraight.bin
+- kenney-racing-kit/gltf/roadStraight.gltf
+- kenney-racing-kit/gltf/roadStraightLong.bin
+- kenney-racing-kit/gltf/roadStraightLong.gltf
+- kenney-racing-kit/gltf/tankcoBanner.png
+- kenney-racing-kit/gltf/tent.bin
+- kenney-racing-kit/gltf/tent.gltf
+- kenney-racing-kit/gltf/tentLong.bin
+- kenney-racing-kit/gltf/tentLong.gltf
+- kenney-racing-kit/gltf/treeLarge.bin
+- kenney-racing-kit/gltf/treeLarge.gltf
+- kenney-racing-kit/gltf/treeSmall.bin
+- kenney-racing-kit/gltf/treeSmall.gltf
+
+Imported From Local Cache:
+- C:/Users/rneet/OneDrive/Desktop/Emptines/public/assets/graphics/world/models/oss-neontown/GLTF
+- C:/Users/rneet/AppData/Local/Temp/cargame-kenney-racing-kit/racing-kit-1.2.zip

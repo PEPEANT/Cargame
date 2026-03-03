@@ -4,7 +4,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { Server } from "socket.io";
 import { createRoomJoinToken } from "./src/server/roomToken.js";
 
-const ROOM_CODE_PREFIX = "OX";
+const ROOM_CODE_PREFIX = "CR";
 const ROOM_CODE_RANDOM_LENGTH = 5;
 const ENTRY_PARTICIPANT_LIMIT = Math.max(
   1,

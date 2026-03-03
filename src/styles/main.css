@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color-scheme: only light;
   --hud-text: #f3f8ff;
   --hud-border: rgba(188, 213, 238, 0.56);
@@ -81,7 +81,7 @@ body.mobile-orientation-lock #mobile-controls,
 body.mobile-orientation-lock #mobile-look-pad,
 body.mobile-orientation-lock #chat-ui,
 body.mobile-orientation-lock #tool-ui,
-body.mobile-orientation-lock #quiz-controls,
+body.mobile-orientation-lock #race-controls,
 body.mobile-orientation-lock #player-roster-panel,
 body.mobile-orientation-lock #hub-flow-ui {
   opacity: 0;
@@ -211,7 +211,7 @@ body.mobile-orientation-lock #hub-flow-ui {
 }
 
 .roster-entry.host .roster-name::before {
-  content: "방장 ";
+  content: "諛⑹옣 ";
   color: #9ad2ff;
   font-weight: 800;
 }
@@ -525,14 +525,14 @@ body.mobile-roster-focus #mobile-look-pad {
   pointer-events: none;
 }
 
-.quiz-controls-head {
+.race-controls-head {
   margin-bottom: 2px;
   color: #caf0ff;
   font: 800 0.64rem/1.2 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
   letter-spacing: 0.16em;
 }
 
-#quiz-controls {
+#race-controls {
   position: fixed;
   top: 14px;
   right: 14px;
@@ -547,18 +547,18 @@ body.mobile-roster-focus #mobile-look-pad {
   backdrop-filter: blur(5px);
 }
 
-.quiz-controls-row {
+.race-controls-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
 }
 
-.quiz-host-btn {
+.race-host-btn {
   grid-column: 1 / -1;
   background: linear-gradient(140deg, rgba(30, 62, 92, 0.96), rgba(12, 28, 44, 0.98));
 }
 
-#quiz-controls button {
+#race-controls button {
   height: 34px;
   border: 1px solid rgba(170, 211, 243, 0.7);
   border-radius: 8px;
@@ -569,20 +569,8 @@ body.mobile-roster-focus #mobile-look-pad {
   cursor: pointer;
 }
 
-#quiz-controls button:hover {
+#race-controls button:hover {
   border-color: rgba(210, 235, 255, 0.92);
-}
-
-#quiz-config-btn {
-  background: linear-gradient(140deg, rgba(26, 58, 86, 0.96), rgba(12, 31, 48, 0.98));
-}
-
-#quiz-lock-btn {
-  grid-column: 1 / -1;
-}
-
-#quiz-review-btn {
-  background: linear-gradient(140deg, rgba(34, 70, 42, 0.96), rgba(14, 33, 20, 0.98));
 }
 
 .portal-controls-row {
@@ -590,7 +578,7 @@ body.mobile-roster-focus #mobile-look-pad {
   gap: 5px;
 }
 
-#quiz-controls select,
+#race-controls select,
 #billboard-media-url-input {
   width: 100%;
   height: 33px;
@@ -604,7 +592,7 @@ body.mobile-roster-focus #mobile-look-pad {
   outline: none;
 }
 
-#quiz-controls select:focus,
+#race-controls select:focus,
 #billboard-media-url-input:focus {
   border-color: rgba(203, 233, 255, 0.95);
   box-shadow: 0 0 0 2px rgba(134, 179, 218, 0.22);
@@ -700,7 +688,7 @@ body.mobile-roster-focus #mobile-look-pad {
   box-shadow: 0 0 0 2px rgba(134, 179, 218, 0.22);
 }
 
-#quiz-controls-note {
+#race-controls-note {
   color: rgba(196, 225, 248, 0.84);
   font: 700 0.61rem/1.25 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
   letter-spacing: 0.04em;
@@ -750,248 +738,6 @@ body.mobile-roster-focus #mobile-look-pad {
 
 #moderation-unmute-btn {
   background: linear-gradient(140deg, rgba(29, 63, 44, 0.95), rgba(14, 33, 22, 0.98));
-}
-
-#quiz-config-modal,
-#quiz-review-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 86;
-  display: grid;
-  place-items: center;
-  padding: 16px;
-  background:
-    radial-gradient(circle at 18% 14%, rgba(120, 201, 255, 0.2), transparent 44%),
-    linear-gradient(180deg, rgba(4, 11, 18, 0.74), rgba(4, 10, 16, 0.9));
-}
-
-#quiz-config-panel,
-#quiz-review-panel {
-  width: min(96vw, 760px);
-  max-height: min(88vh, 860px);
-  overflow: auto;
-  display: grid;
-  gap: 8px;
-  padding: 14px;
-  border: 1px solid rgba(163, 208, 240, 0.7);
-  border-radius: 12px;
-  background: linear-gradient(150deg, rgba(13, 32, 49, 0.94), rgba(8, 20, 31, 0.97));
-  box-shadow: 0 18px 40px rgba(2, 8, 14, 0.5);
-}
-
-#quiz-review-panel {
-  width: min(92vw, 560px);
-}
-
-.quiz-modal-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.quiz-modal-head h2 {
-  margin: 0;
-  color: #ebf8ff;
-  font: 800 0.95rem/1.2 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-  letter-spacing: 0.08em;
-}
-
-.quiz-modal-head button {
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid rgba(178, 216, 245, 0.68);
-  border-radius: 8px;
-  background: rgba(13, 31, 47, 0.9);
-  color: #e5f7ff;
-  font: 700 0.64rem/1 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-
-.quiz-config-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 7px;
-}
-
-.quiz-toolbar-sep {
-  width: 1px;
-  height: 22px;
-  background: rgba(163, 207, 238, 0.35);
-  align-self: center;
-}
-
-#quiz-category-tukgal-load-btn,
-#quiz-category-tukgal-save-btn {
-  border-color: rgba(178, 238, 200, 0.68);
-  color: #d4ffe8;
-}
-
-#quiz-category-history-load-btn,
-#quiz-category-history-save-btn {
-  border-color: rgba(255, 200, 140, 0.68);
-  color: #ffe4c2;
-}
-
-.quiz-config-toolbar label {
-  color: #cde8fb;
-  font: 700 0.62rem/1.2 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-  letter-spacing: 0.06em;
-}
-
-#quiz-slot-count-input {
-  height: 30px;
-  border: 1px solid rgba(163, 207, 238, 0.68);
-  border-radius: 7px;
-  background: rgba(10, 27, 42, 0.9);
-  color: #ecf8ff;
-  font: 700 0.66rem/1 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-  letter-spacing: 0.03em;
-  text-align: center;
-}
-
-.quiz-checkbox {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #d4ecff;
-  font: 700 0.62rem/1 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-}
-
-.quiz-config-toolbar button,
-.quiz-config-actions button {
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid rgba(178, 216, 245, 0.68);
-  border-radius: 8px;
-  background: rgba(13, 31, 47, 0.9);
-  color: #e5f7ff;
-  font: 700 0.62rem/1 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-
-#quiz-config-status {
-  margin: 0;
-  color: #c5e2f8;
-  font: 700 0.64rem/1.3 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-}
-
-#quiz-config-status.error {
-  color: #ffd1d1;
-}
-
-#quiz-question-list {
-  display: grid;
-  gap: 6px;
-}
-
-.quiz-question-row {
-  display: grid;
-  grid-template-columns: 34px 1fr 108px;
-  gap: 6px;
-  padding: 7px;
-  border: 1px solid rgba(146, 193, 226, 0.48);
-  border-radius: 8px;
-  background: rgba(9, 25, 40, 0.72);
-}
-
-.quiz-question-order {
-  display: grid;
-  place-items: center;
-  color: #b4d9f5;
-  font: 700 0.6rem/1 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-}
-
-.quiz-question-fields {
-  display: grid;
-  gap: 5px;
-}
-
-.quiz-question-side {
-  display: grid;
-  gap: 5px;
-  align-content: start;
-}
-
-.quiz-question-fields input,
-.quiz-question-fields textarea,
-.quiz-question-answer,
-.quiz-question-time {
-  width: 100%;
-  border: 1px solid rgba(158, 201, 233, 0.62);
-  border-radius: 7px;
-  background: rgba(10, 28, 43, 0.9);
-  color: #e8f7ff;
-  font: 700 0.62rem/1.3 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-  letter-spacing: 0.02em;
-}
-
-.quiz-question-fields input {
-  height: 30px;
-  padding: 0 8px;
-}
-
-.quiz-question-fields textarea {
-  min-height: 56px;
-  padding: 6px 8px;
-  resize: vertical;
-}
-
-.quiz-question-answer {
-  height: 30px;
-  padding: 0 7px;
-}
-
-.quiz-question-time-wrap {
-  display: grid;
-  gap: 4px;
-  color: #c5e2f8;
-  font: 700 0.54rem/1 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-  letter-spacing: 0.05em;
-}
-
-.quiz-question-time {
-  height: 28px;
-  padding: 0 7px;
-}
-
-.quiz-config-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-#quiz-review-index,
-#quiz-review-question,
-#quiz-review-answer,
-#quiz-review-explanation {
-  margin: 0;
-}
-
-#quiz-review-index {
-  color: #b9def9;
-  font: 700 0.62rem/1.2 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-}
-
-#quiz-review-question {
-  color: #f0f9ff;
-  font: 800 0.82rem/1.35 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-}
-
-#quiz-review-answer {
-  color: #d3ecff;
-  font: 700 0.68rem/1.25 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-}
-
-#quiz-review-explanation {
-  color: #c6e0f5;
-  font: 700 0.66rem/1.4 "Bahnschrift", "Trebuchet MS", "Segoe UI", sans-serif;
-  white-space: pre-wrap;
 }
 
 #hub-flow-ui {
@@ -1770,7 +1516,7 @@ body.mobile-chat-focus #chat-header {
     width: calc(100vw - 14px);
   }
 
-  #quiz-controls {
+  #race-controls {
     top: auto;
     bottom: 14px;
     right: 10px;
@@ -1779,7 +1525,7 @@ body.mobile-chat-focus #chat-header {
     gap: 5px;
   }
 
-  #quiz-controls button {
+  #race-controls button {
     height: 32px;
     font-size: 0.63rem;
   }
@@ -1794,7 +1540,7 @@ body.mobile-chat-focus #chat-header {
     font-size: 0.62rem;
   }
 
-  #quiz-controls select,
+  #race-controls select,
   #billboard-media-url-input {
     height: 31px;
     font-size: 0.61rem;
@@ -1941,49 +1687,6 @@ body.mobile-chat-focus #chat-header {
     font-size: 0.74rem;
   }
 
-  #quiz-config-panel,
-  #quiz-review-panel {
-    width: min(98vw, 760px);
-    max-height: min(90vh, 860px);
-    padding: 10px;
-  }
-
-  .quiz-config-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .quiz-config-toolbar label[for="quiz-slot-count-input"] {
-    grid-column: unset;
-  }
-
-  #quiz-slot-count-input {
-    grid-column: unset;
-  }
-
-  .quiz-checkbox {
-    justify-self: unset;
-  }
-
-  .quiz-config-toolbar .quiz-checkbox:nth-of-type(1) {
-    grid-column: unset;
-  }
-
-  .quiz-config-toolbar .quiz-checkbox:nth-of-type(2) {
-    grid-column: unset;
-  }
-
-  #quiz-config-reset-btn {
-    grid-column: unset;
-  }
-
-  .quiz-question-row {
-    grid-template-columns: 28px 1fr 86px;
-    gap: 5px;
-    padding: 6px;
-  }
-
   #mobile-controls {
     left: max(8px, env(safe-area-inset-left));
     right: max(8px, env(safe-area-inset-right));
@@ -2053,3 +1756,4 @@ body.mobile-chat-focus #chat-header {
     min-height: 0;
   }
 }
+

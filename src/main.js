@@ -34,7 +34,7 @@ function boot() {
   }
 
   try {
-    const game = createGame(mount, { contentPackId: "base-void" });
+    const game = createGame(mount, { contentPackId: "car-race-alpha" });
     game.init();
     window.__emptinesGame = game;
   } catch (error) {

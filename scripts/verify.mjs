@@ -87,10 +87,22 @@ async function checkSyntax() {
     "src/game/content/schema.js",
     "src/game/content/packs/baseVoidPack.js",
     "src/game/content/packs/base-void/pack.js",
+    "src/game/content/packs/car-race-alpha/pack.js",
     "src/game/content/packs/template/pack.template.js",
+    "src/game/modes/race/RaceSessionDefaults.js",
+    "src/game/vehicle/spawn/vehicleSpawnPlanner.js",
+    "src/game/vehicle/seat/vehicleSeatAllocator.js",
+    "src/game/world/track/trackBlueprint.js",
+    "src/game/world/track/centerlineProgress.js",
+    "src/game/world/track/clientRoadMesh.js",
+    "src/server/race/centerlineColliderLayout.js",
+    "src/server/race/progressJudge.js",
     "src/game/utils/device.js",
     "src/game/utils/math.js",
     "src/game/utils/threeUtils.js",
+    "scripts/audit-ox.mjs",
+    "scripts/preview-race-grid.mjs",
+    "scripts/verify-map-assets.mjs",
     "scripts/world-audit.mjs",
     "server.js"
   ];
@@ -192,75 +204,26 @@ async function checkSocketServer() {
     await waitFor(() => receivedSync, 5000);
     await waitFor(() => roomPlayerCount >= 2, 5000);
 
-    let quizStart = 0;
-    let quizQuestion = 0;
-    let quizLock = 0;
-    let quizResult = 0;
-    let quizEnd = 0;
-    let lastQuizScore = null;
-
-    c1.on("quiz:start", () => {
-      quizStart += 1;
+    let controller = c1;
+    let setTargetAck = await emitAck(c1, "portal:set-target", {
+      targetUrl: "https://example.com/race"
     });
-    c1.on("quiz:question", () => {
-      quizQuestion += 1;
-    });
-    c1.on("quiz:lock", () => {
-      quizLock += 1;
-    });
-    c1.on("quiz:result", () => {
-      quizResult += 1;
-    });
-    c1.on("quiz:end", () => {
-      quizEnd += 1;
-    });
-    c1.on("quiz:score", (payload = {}) => {
-      lastQuizScore = payload;
-    });
-
-    // Keep both players on O-zone so they survive to the next question.
-    c1.emit("player:sync", { x: -10, y: 1.72, z: 0, yaw: 0, pitch: 0 });
-    c2.emit("player:sync", { x: -12, y: 1.72, z: 0, yaw: 0, pitch: 0 });
-
-    let hostClient = c1;
-    let quizStartAck = await emitAck(c1, "quiz:start", {
-      questions: [
-        { id: "VERIFY_Q1", text: "verify 1", answer: "O", timeLimitSeconds: 30 },
-        { id: "VERIFY_Q2", text: "verify 2", answer: "O", timeLimitSeconds: 30 }
-      ]
-    });
-    if (!quizStartAck?.ok) {
-      hostClient = c2;
-      quizStartAck = await emitAck(c2, "quiz:start", {
-        questions: [
-          { id: "VERIFY_Q1", text: "verify 1", answer: "O", timeLimitSeconds: 30 },
-          { id: "VERIFY_Q2", text: "verify 2", answer: "O", timeLimitSeconds: 30 }
-        ]
+    if (!setTargetAck?.ok) {
+      controller = c2;
+      setTargetAck = await emitAck(c2, "portal:set-target", {
+        targetUrl: "https://example.com/race"
       });
     }
-    assert(quizStartAck?.ok === true, `quiz:start failed: ${JSON.stringify(quizStartAck)}`);
+    assert(setTargetAck?.ok === true, `portal:set-target failed: ${JSON.stringify(setTargetAck)}`);
 
-    await waitFor(() => quizQuestion >= 1, 8000);
-    c1.emit("player:sync", { x: -10, y: 1.72, z: 0, yaw: 0, pitch: 0 });
-    c2.emit("player:sync", { x: -12, y: 1.72, z: 0, yaw: 0, pitch: 0 });
-    await sleep(120);
-    const forceLockAck1 = await emitAck(hostClient, "quiz:force-lock");
-    assert(forceLockAck1?.ok === true, `first quiz:force-lock failed: ${JSON.stringify(forceLockAck1)}`);
+    let openAck = await emitAck(controller, "portal:lobby-open");
+    assert(openAck?.ok === true, `portal:lobby-open failed: ${JSON.stringify(openAck)}`);
 
-    await waitFor(() => quizResult >= 1 && quizQuestion >= 2, 12000);
-    c1.emit("player:sync", { x: -10, y: 1.72, z: 0, yaw: 0, pitch: 0 });
-    c2.emit("player:sync", { x: -12, y: 1.72, z: 0, yaw: 0, pitch: 0 });
-    await sleep(120);
-    const forceLockAck2 = await emitAck(hostClient, "quiz:force-lock");
-    assert(forceLockAck2?.ok === true, `second quiz:force-lock failed: ${JSON.stringify(forceLockAck2)}`);
-
-    await waitFor(() => quizEnd >= 1 && quizResult >= 2, 16000);
-    assert(quizStart >= 1, "quiz:start event was not received");
-    assert(quizQuestion >= 2, "quiz:question did not progress through all questions");
-    assert(quizLock >= 2, "quiz:lock did not fire for each question");
-    assert(quizResult >= 2, "quiz:result did not fire for each question");
-    assert(lastQuizScore && Array.isArray(lastQuizScore.leaderboard), "quiz:score payload is missing leaderboard");
-    assert(lastQuizScore.leaderboard.length >= 2, "quiz:score leaderboard should include both clients");
+    // Admission start can fail when no waiting players; this is acceptable in smoke mode.
+    const startAck = await emitAck(controller, "portal:lobby-start");
+    if (startAck?.ok !== true && startAck?.error !== "no players waiting admission") {
+      throw new Error(`portal:lobby-start failed: ${JSON.stringify(startAck)}`);
+    }
 
     c2.disconnect();
     c1.emit("room:list");

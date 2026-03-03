@@ -5,3 +5,7 @@ Thumbs.db
 refs
 .logs
 
+# Temporary OSS intake cache (do not commit full archive/raw dump)
+public/assets/tracks/oss/kenney-racing-kit-1.2.zip
+public/assets/tracks/oss/kenney_racing_kit_1_2_raw/
+

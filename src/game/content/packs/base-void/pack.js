@@ -113,57 +113,7 @@ export const BASE_VOID_PACK = {
       centerY: 11.2,
       poleHeight: 11,
       position: [0, 0, -32],
-      lines: ["OX \uD034\uC988 10", "\uCD5C\uB300 50\uBA85"]
-    },
-    oxArena: {
-      enabled: true,
-      dividerWidth: 1.3,
-      dividerDepth: 58,
-      dividerHeight: 0.24,
-      dividerColor: 0x1f252d,
-      oZone: {
-        centerX: -17,
-        width: 31,
-        depth: 56,
-        color: 0x2e8f62,
-        emissive: 0x104f36
-      },
-      xZone: {
-        centerX: 17,
-        width: 31,
-        depth: 56,
-        color: 0x9b3840,
-        emissive: 0x5b1b20
-      },
-      textY: 0.09,
-      backWall: {
-        enabled: true,
-        centerZ: -42,
-        centerY: 8.8,
-        width: 74,
-        height: 17.6,
-        thickness: 1.5,
-        color: 0x56606c,
-        roughness: 0.86,
-        metalness: 0.06,
-        emissive: 0x1d2631,
-        emissiveIntensity: 0.12
-      },
-      ads: {
-        enabled: false,
-        textureUrl: "/assets/graphics/world/ads/ox-ad-wall.png",
-        columns: 4,
-        rows: 2,
-        boardWidth: 14.6,
-        boardHeight: 4.8,
-        gapX: 1.4,
-        gapY: 1.3,
-        marginX: 3.6,
-        centerY: 10.8,
-        offsetZ: 0.12,
-        frameThickness: 0.24,
-        frameColor: 0x1b222b
-      }
+      lines: ["RACE HUB", "\uCD5C\uB300 50\uBA85"]
     },
     spectatorStands: {
       enabled: true,
@@ -179,8 +129,8 @@ export const BASE_VOID_PACK = {
       emissive: 0x242d37,
       emissiveIntensity: 0.12,
       ads: {
-        enabled: true,
-        textureUrl: "/assets/graphics/world/ads/ox-ad-wall.png",
+        enabled: false,
+        textureUrl: "",
         boardWidth: 8.6,
         boardHeight: 2.6,
         boardDepth: 0.3,
@@ -297,7 +247,7 @@ export const BASE_VOID_PACK = {
         spawn: [0, GAME_CONSTANTS.PLAYER_HEIGHT, -8]
       },
       portal: {
-        // Keep the transfer gate outside the OX arena on the right side.
+        // Keep the transfer gate outside the legacy arena on the right side.
         position: [44, 0.08, 14],
         radius: 4.4,
         cooldownSeconds: 60,

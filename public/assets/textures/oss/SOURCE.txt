@@ -1,0 +1,26 @@
+OSS Source Manifest (textures/oss)
+
+Status: IMPORTED
+Retrieved Date: 2026-03-03
+
+Upstreams:
+- ambientCG Grass001 (CC0)
+  - https://ambientcg.com/view?id=Grass001
+- ambientCG Ground055S (CC0)
+  - https://ambientcg.com/view?id=Ground055S
+- three.js examples waternormals.jpg (MIT)
+  - https://github.com/mrdoob/three.js/blob/dev/examples/textures/waternormals.jpg
+
+Imported Files:
+- ambientcg-grass/grass_color.jpg
+- ambientcg-grass/grass_normal_gl.jpg
+- ambientcg-grass/grass_roughness.jpg
+- ambientcg-grass/grass_ao.jpg
+- ambientcg-sand/sand_color.jpg
+- ambientcg-sand/sand_normal_gl.jpg
+- ambientcg-sand/sand_roughness.jpg
+- ambientcg-sand/sand_ao.jpg
+- three-water/waternormals.jpg
+
+Imported From Local Cache:
+- C:/Users/rneet/OneDrive/Desktop/Emptines/public/assets/graphics/world/textures

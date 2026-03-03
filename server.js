@@ -1,7 +1,22 @@
 ﻿import { createServer } from "http";
 import { Server } from "socket.io";
-import { BASE_VOID_PACK } from "./src/game/content/packs/base-void/pack.js";
 import { verifyRoomJoinToken } from "./src/server/roomToken.js";
+import { createRaceSessionDraft } from "./src/game/modes/race/RaceSessionDefaults.js";
+import {
+  CAR_RACE_TRACK_BLUEPRINT,
+  getCenterlinePoints,
+  getTrackCheckpointProgressValues
+} from "./src/game/world/track/trackBlueprint.js";
+import {
+  buildCenterlineMetrics,
+  projectPointToCenterlineProgress
+} from "./src/game/world/track/centerlineProgress.js";
+import { buildRaceColliderLayout } from "./src/server/race/centerlineColliderLayout.js";
+import {
+  createProgressState,
+  judgeProgressTransition,
+  validateTrackForProgress
+} from "./src/server/race/progressJudge.js";
 
 function parseCorsOrigins(rawValue) {
   const value = String(rawValue ?? "").trim();
@@ -46,7 +61,7 @@ async function probeExistingServer(port) {
   }
 }
 
-const ROOM_CODE_PREFIX = "OX";
+const ROOM_CODE_PREFIX = "CR";
 const ROOM_CODE_RANDOM_LENGTH = 5;
 const ENTRY_PARTICIPANT_LIMIT = Math.max(
   1,
@@ -69,12 +84,97 @@ const SERVER_TICK_RATE = 20;
 const SERVER_TICK_INTERVAL_MS = Math.max(30, Math.trunc(1000 / SERVER_TICK_RATE));
 const SERVER_DELTA_HEARTBEAT_TICKS = 20;
 
-const AOI_NEAR_RADIUS = 42;
-const AOI_MID_RADIUS = 82;
-const AOI_FAR_RADIUS = 128;
-const AOI_MID_CADENCE = 2;
-const AOI_FAR_CADENCE = 4;
-const AOI_EDGE_CADENCE = 8;
+const ACTIVE_TRACK_BLUEPRINT = CAR_RACE_TRACK_BLUEPRINT;
+const TRACK_CENTERLINE_POINTS = getCenterlinePoints(ACTIVE_TRACK_BLUEPRINT);
+const TRACK_CENTERLINE_METRICS = buildCenterlineMetrics(TRACK_CENTERLINE_POINTS);
+const TRACK_CHECKPOINT_PROGRESS_VALUES = getTrackCheckpointProgressValues(ACTIVE_TRACK_BLUEPRINT);
+const TRACK_PROGRESS_VALIDATION = validateTrackForProgress(ACTIVE_TRACK_BLUEPRINT);
+const TRACK_COLLIDER_LAYOUT = buildRaceColliderLayout(ACTIVE_TRACK_BLUEPRINT);
+const TRACK_INTEREST_CONFIG = ACTIVE_TRACK_BLUEPRINT?.networkInterest ?? {};
+
+function cadenceFromHz(rawHz, fallbackHz) {
+  const hz = Number(rawHz);
+  const safeHz = Number.isFinite(hz) && hz > 0 ? hz : fallbackHz;
+  return Math.max(1, Math.round(SERVER_TICK_RATE / Math.max(1, safeHz)));
+}
+
+function buildTrackBoundsFromCenterline(metrics, padding = 24) {
+  const points = Array.isArray(metrics?.points) ? metrics.points : [];
+  if (points.length <= 0) {
+    return {
+      minX: -512,
+      maxX: 512,
+      minZ: -512,
+      maxZ: 512
+    };
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    const x = Number(point?.x);
+    const z = Number(point?.z);
+    if (!Number.isFinite(x) || !Number.isFinite(z)) {
+      continue;
+    }
+    if (x < minX) {
+      minX = x;
+    }
+    if (x > maxX) {
+      maxX = x;
+    }
+    if (z < minZ) {
+      minZ = z;
+    }
+    if (z > maxZ) {
+      maxZ = z;
+    }
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minZ) || !Number.isFinite(maxZ)) {
+    return {
+      minX: -512,
+      maxX: 512,
+      minZ: -512,
+      maxZ: 512
+    };
+  }
+  const safePadding = Math.max(4, Number(padding) || 24);
+  return {
+    minX: minX - safePadding,
+    maxX: maxX + safePadding,
+    minZ: minZ - safePadding,
+    maxZ: maxZ + safePadding
+  };
+}
+
+function resolveTrackBoundary(track, metrics) {
+  const source = track?.boundary ?? {};
+  const auto = buildTrackBoundsFromCenterline(metrics, source?.padding ?? 24);
+  const minX = Number.isFinite(Number(source?.minX)) ? Number(source.minX) : auto.minX;
+  const maxX = Number.isFinite(Number(source?.maxX)) ? Number(source.maxX) : auto.maxX;
+  const minZ = Number.isFinite(Number(source?.minZ)) ? Number(source.minZ) : auto.minZ;
+  const maxZ = Number.isFinite(Number(source?.maxZ)) ? Number(source.maxZ) : auto.maxZ;
+  return {
+    enabled: source?.enabled !== false,
+    useInvisibleWalls: source?.useInvisibleWalls !== false,
+    wallMargin: Math.max(0, Math.min(6, Number(source?.wallMargin) || 0.75)),
+    minX: Math.min(minX, maxX),
+    maxX: Math.max(minX, maxX),
+    minZ: Math.min(minZ, maxZ),
+    maxZ: Math.max(minZ, maxZ)
+  };
+}
+
+const TRACK_BOUNDARY = resolveTrackBoundary(ACTIVE_TRACK_BLUEPRINT, TRACK_CENTERLINE_METRICS);
+
+const AOI_NEAR_RADIUS = Math.max(40, Number(TRACK_INTEREST_CONFIG?.nearRadius) || 96);
+const AOI_MID_RADIUS = Math.max(AOI_NEAR_RADIUS + 24, Number(TRACK_INTEREST_CONFIG?.midRadius) || 192);
+const AOI_FAR_RADIUS = Math.max(AOI_MID_RADIUS + 32, Number(TRACK_INTEREST_CONFIG?.farRadius) || 280);
+const AOI_NEAR_CADENCE = cadenceFromHz(TRACK_INTEREST_CONFIG?.nearHz, 20);
+const AOI_MID_CADENCE = Math.max(AOI_NEAR_CADENCE, cadenceFromHz(TRACK_INTEREST_CONFIG?.midHz, 12));
+const AOI_FAR_CADENCE = Math.max(AOI_MID_CADENCE, cadenceFromHz(TRACK_INTEREST_CONFIG?.farHz, 10));
+const AOI_EDGE_CADENCE = Math.max(AOI_FAR_CADENCE, cadenceFromHz(TRACK_INTEREST_CONFIG?.edgeHz, 10));
 
 const DELTA_POS_SCALE = 100;
 const DELTA_ROT_SCALE = 1000;
@@ -86,26 +186,58 @@ const SERVER_MOVEMENT_MARGIN = 0.4;
 const SERVER_MAX_TELEPORT_DISTANCE = 18;
 const SERVER_CORRECTION_MIN_DISTANCE = 0.22;
 const SERVER_CORRECTION_COOLDOWN_MS = 140;
-
-const QUIZ_DEFAULT_LOCK_SECONDS = 30;
-const QUIZ_MIN_LOCK_SECONDS = 30;
-const QUIZ_MAX_LOCK_SECONDS = 3600;
-const QUIZ_LOCK_SYNC_GRACE_MS = Math.max(
-  0,
-  Math.min(1200, Math.trunc(Number(process.env.QUIZ_LOCK_SYNC_GRACE_MS ?? 180) || 180))
+const TRACK_PROGRESS_READY =
+  TRACK_PROGRESS_VALIDATION.ok === true && Number(TRACK_CENTERLINE_METRICS?.totalLength || 0) > 0;
+const TRACK_PROGRESS_MAX_DISTANCE = Math.max(
+  8,
+  Number(ACTIVE_TRACK_BLUEPRINT?.collider?.boxWidth || 16.2) * 0.68
 );
-const QUIZ_MAX_QUESTIONS = 50;
-const QUIZ_TEXT_MAX_LENGTH = 180;
-const QUIZ_EXPLANATION_MAX_LENGTH = 720;
-const QUIZ_AUTO_NEXT_DELAY_MS = 3200;
-const QUIZ_PREPARE_DELAY_MS = 3000;
-const QUIZ_AUTO_START_DELAY_MS = 12000;
-const QUIZ_AUTO_RESTART_DELAY_MS = 9000;
-const QUIZ_AUTO_START_MIN_PLAYERS = 1;
-const QUIZ_END_ON_SINGLE_SURVIVOR = process.env.QUIZ_END_ON_SINGLE_SURVIVOR === "1";
-const QUIZ_AUTO_OPEN_LOBBY_ON_END = process.env.QUIZ_AUTO_OPEN_LOBBY_ON_END !== "0";
-const QUIZ_ZONE_EDGE_MARGIN = 0.5;
-const QUIZ_ZONE_CENTER_MARGIN = 0.8;
+const TRACK_PROGRESS_SELF_EMIT_INTERVAL_MS = 180;
+const TRACK_PROGRESS_ROOM_EMIT_INTERVAL_MS = 900;
+const TRACK_PROGRESS_MIN_DELTA = 0.0025;
+const TRACK_RESPAWN_CONFIG = ACTIVE_TRACK_BLUEPRINT?.respawn ?? {};
+const TRACK_ANTICHEAT_RULES = ACTIVE_TRACK_BLUEPRINT?.raceRules?.antiCheat ?? {};
+const TRACK_ANTICHEAT_ENABLED = TRACK_ANTICHEAT_RULES?.enabled !== false;
+const TRACK_ANTICHEAT_MAX_DISTANCE = Math.max(
+  TRACK_PROGRESS_MAX_DISTANCE + 6,
+  Number(TRACK_ANTICHEAT_RULES?.maxDistanceFromCenterline) || TRACK_PROGRESS_MAX_DISTANCE * 1.85
+);
+const TRACK_ANTICHEAT_RESET_WRONG_WAY_DELTA = Math.max(
+  0.03,
+  Number(TRACK_ANTICHEAT_RULES?.resetWrongWayDelta) || 0.075
+);
+const TRACK_ANTICHEAT_RESET_WRONG_WAY_STRIKES = Math.max(
+  1,
+  Math.trunc(Number(TRACK_ANTICHEAT_RULES?.resetWrongWayStrikes) || 3)
+);
+const TRACK_ANTICHEAT_RESET_CUTTING_STRIKES = Math.max(
+  1,
+  Math.trunc(Number(TRACK_ANTICHEAT_RULES?.resetCuttingStrikes) || 2)
+);
+const TRACK_ANTICHEAT_RESET_COOLDOWN_MS = Math.max(
+  800,
+  Math.trunc(Number(TRACK_ANTICHEAT_RULES?.resetCooldownMs) || 2200)
+);
+const TRACK_RESPAWN_BACKTRACK_PROGRESS = Math.max(
+  0,
+  Math.min(0.08, Number(TRACK_RESPAWN_CONFIG?.backtrackProgress) || 0.004)
+);
+const TRACK_RESPAWN_LATERAL_OFFSET = Number(TRACK_RESPAWN_CONFIG?.pocketLateralOffset) || 0;
+const TRACK_SPAWN_HUB = ACTIVE_TRACK_BLUEPRINT?.spawnHub ?? {};
+const TRACK_SEAT_RULES = ACTIVE_TRACK_BLUEPRINT?.raceRules?.seatAssignment ?? {};
+const TRACK_SEAT_ALLOW_MANUAL_OPTION = TRACK_SEAT_RULES?.allowManualOption !== false;
+const TRACK_SEAT_DEFAULT_MODE =
+  String(TRACK_SEAT_RULES?.modeDefault ?? "auto").trim().toLowerCase() === "manual" &&
+  TRACK_SEAT_ALLOW_MANUAL_OPTION
+    ? "manual"
+    : "auto";
+
+const race_DEFAULT_LOCK_SECONDS = 30;
+const race_PREPARE_DELAY_MS = 3000;
+const race_AUTO_START_DELAY_MS = 12000;
+const race_AUTO_RESTART_DELAY_MS = 9000;
+const race_AUTO_START_MIN_PLAYERS = 1;
+const race_AUTO_OPEN_LOBBY_ON_END = process.env.race_AUTO_OPEN_LOBBY_ON_END !== "0";
 const DEFAULT_PORTAL_TARGET_URL = sanitizePortalTargetUrl(process.env.PORTAL_TARGET_URL ?? "");
 const CHAT_HISTORY_MAX_ENTRIES = Math.max(
   20,
@@ -114,99 +246,16 @@ const CHAT_HISTORY_MAX_ENTRIES = Math.max(
 const BILLBOARD_MEDIA_URL_MAX_LENGTH = 420;
 const BILLBOARD_MEDIA_VISUAL_TYPES = new Set(["none", "video", "image"]);
 const BILLBOARD_PLAYLIST_MAX_ITEMS = 40;
-const ROOM_QUIZ_CONFIG_CACHE_LIMIT = Math.max(24, MAX_ACTIVE_ROOMS * 6);
+const ROOM_race_CONFIG_CACHE_LIMIT = Math.max(24, MAX_ACTIVE_ROOMS * 6);
 
-const FALLBACK_QUIZ_QUESTIONS = Object.freeze([
-  Object.freeze({
-    id: "Q1",
-    text: "특이점 갤러리는 디시인사이드의 갤러리 중 하나다.",
-    answer: "O"
-  }),
-  Object.freeze({
-    id: "Q2",
-    text: "디시인사이드 갤러리 글에는 보통 댓글(리플)을 달 수 있다.",
-    answer: "O"
-  }),
-  Object.freeze({
-    id: "Q3",
-    text: "디시에서는 글이 추천을 많이 받으면 개념글 같은 형태로 모아지기도 한다.",
-    answer: "O"
-  }),
-  Object.freeze({
-    id: "Q4",
-    text: "특갤에서는 AI, 특이점, AGI 같은 미래기술 이야기가 자주 나온다.",
-    answer: "O"
-  }),
-  Object.freeze({
-    id: "Q5",
-    text: "디시에서는 회원만 글을 쓸 수 있고 비회원은 글/댓글 작성이 절대 불가능하다.",
-    answer: "X"
-  }),
-  Object.freeze({
-    id: "Q6",
-    text: "디시에는 추천뿐 아니라 비추천(비추) 같은 반응도 존재한다.",
-    answer: "O"
-  }),
-  Object.freeze({
-    id: "Q7",
-    text: "디시 갤러리에서는 닉네임 대신 익명/아이디처럼 보이는 형태로 글이 올라올 수 있다.",
-    answer: "O"
-  }),
-  Object.freeze({
-    id: "Q8",
-    text: "특갤의 모든 글은 공식적으로 검증된 뉴스/논문만 허용된다.",
-    answer: "X"
-  }),
-  Object.freeze({
-    id: "Q9",
-    text: "디시 갤러리 문화에는 밈(유행어/드립) 같은 요소가 섞이는 경우가 많다.",
-    answer: "O"
-  }),
-  Object.freeze({
-    id: "Q10",
-    text: "특갤은 다른 갤과 마찬가지로 분위기와 유행이 시기마다 바뀔 수 있다.",
-    answer: "O"
-  })
-]);
-
-const QUIZ_ARENA_CONFIG = BASE_VOID_PACK?.world?.oxArena ?? {};
-
-function readZoneBounds(zoneConfig, fallbackCenterX) {
-  const width = Math.max(8, Number(zoneConfig?.width) || 20);
-  const depth = Math.max(8, Number(zoneConfig?.depth) || 20);
-  const centerX = Number.isFinite(Number(zoneConfig?.centerX))
-    ? Number(zoneConfig.centerX)
-    : fallbackCenterX;
-  const centerZ = Number.isFinite(Number(zoneConfig?.centerZ)) ? Number(zoneConfig.centerZ) : 0;
-  const halfW = width * 0.5;
-  const halfD = depth * 0.5;
-  return {
-    centerX,
-    centerZ,
-    width,
-    depth,
-    minX: centerX - halfW,
-    maxX: centerX + halfW,
-    minZ: centerZ - halfD,
-    maxZ: centerZ + halfD
-  };
-}
-
-const QUIZ_O_ZONE = readZoneBounds(QUIZ_ARENA_CONFIG?.oZone, -17);
-const QUIZ_X_ZONE = readZoneBounds(QUIZ_ARENA_CONFIG?.xZone, 17);
-const QUIZ_DIVIDER_WIDTH = Math.max(0.6, Number(QUIZ_ARENA_CONFIG?.dividerWidth) || 1.3);
-const QUIZ_ACTIVE_MIN_Z = Math.min(QUIZ_O_ZONE.minZ, QUIZ_X_ZONE.minZ);
-const QUIZ_ACTIVE_MAX_Z = Math.max(QUIZ_O_ZONE.maxZ, QUIZ_X_ZONE.maxZ);
-const QUIZ_CENTER_DEAD_BAND = QUIZ_DIVIDER_WIDTH * 0.5 + QUIZ_ZONE_CENTER_MARGIN;
 const ADMISSION_SPAWN_Y = 1.72;
 const ADMISSION_SPAWN_CENTER_X = 0;
 const ADMISSION_SPAWN_CENTER_Z = 14;
 const ADMISSION_SPAWN_RING_START = 2.4;
 const ADMISSION_SPAWN_RING_STEP = 2.35;
 const ADMISSION_SPAWN_PER_RING = 10;
-const WORLD_PORTAL_CONFIG = BASE_VOID_PACK?.world?.hubFlow?.portal ?? {};
-const WORLD_PORTAL_POSITION = Array.isArray(WORLD_PORTAL_CONFIG?.position)
-  ? WORLD_PORTAL_CONFIG.position
+const WORLD_PORTAL_POSITION = Array.isArray(TRACK_SPAWN_HUB?.portalPosition)
+  ? TRACK_SPAWN_HUB.portalPosition
   : [44, 0.08, 14];
 const WORLD_PORTAL_CENTER_X = Number.isFinite(Number(WORLD_PORTAL_POSITION?.[0]))
   ? Number(WORLD_PORTAL_POSITION[0])
@@ -214,30 +263,32 @@ const WORLD_PORTAL_CENTER_X = Number.isFinite(Number(WORLD_PORTAL_POSITION?.[0])
 const WORLD_PORTAL_CENTER_Z = Number.isFinite(Number(WORLD_PORTAL_POSITION?.[2]))
   ? Number(WORLD_PORTAL_POSITION[2])
   : 14;
-const WORLD_PORTAL_RADIUS = Math.max(2.2, Number(WORLD_PORTAL_CONFIG?.radius) || 4.4);
+const WORLD_PORTAL_RADIUS = Math.max(2.2, Number(TRACK_SPAWN_HUB?.portalRadius) || 4.4);
 const WORLD_PORTAL_EXIT_OFFSET_X = Math.max(
   2.4,
   Math.min(8.6, WORLD_PORTAL_RADIUS * 0.78 + 1.25)
 );
-const QUIZ_SPECTATOR_ARENA_MARGIN = 1.1;
-const QUIZ_SPECTATOR_ARENA_EXIT_PADDING = 1.4;
-const QUIZ_ARENA_MIN_X =
-  Math.min(QUIZ_O_ZONE.minX, QUIZ_X_ZONE.minX) - QUIZ_SPECTATOR_ARENA_MARGIN;
-const QUIZ_ARENA_MAX_X =
-  Math.max(QUIZ_O_ZONE.maxX, QUIZ_X_ZONE.maxX) + QUIZ_SPECTATOR_ARENA_MARGIN;
-const QUIZ_ARENA_MIN_Z = QUIZ_ACTIVE_MIN_Z - QUIZ_SPECTATOR_ARENA_MARGIN;
-const QUIZ_ARENA_MAX_Z = QUIZ_ACTIVE_MAX_Z + QUIZ_SPECTATOR_ARENA_MARGIN;
-const QUIZ_SPECTATOR_SPAWN_CENTER_X = QUIZ_ARENA_MIN_X - 10;
-const QUIZ_SPECTATOR_SPAWN_CENTER_Z = QUIZ_ARENA_MIN_Z - 10;
-const QUIZ_SPECTATOR_SPAWN_MIN_RADIUS = 2.6;
-const QUIZ_SPECTATOR_SPAWN_MAX_RADIUS = 6.4;
+const race_SPECTATOR_ARENA_MARGIN = 1.1;
+const race_SPECTATOR_ARENA_EXIT_PADDING = 1.4;
+const TRACK_PLAY_MIN_X = Number(TRACK_BOUNDARY?.minX) + Number(TRACK_BOUNDARY?.wallMargin || 0);
+const TRACK_PLAY_MAX_X = Number(TRACK_BOUNDARY?.maxX) - Number(TRACK_BOUNDARY?.wallMargin || 0);
+const TRACK_PLAY_MIN_Z = Number(TRACK_BOUNDARY?.minZ) + Number(TRACK_BOUNDARY?.wallMargin || 0);
+const TRACK_PLAY_MAX_Z = Number(TRACK_BOUNDARY?.maxZ) - Number(TRACK_BOUNDARY?.wallMargin || 0);
+const race_ARENA_MIN_X = Math.min(TRACK_PLAY_MIN_X, TRACK_PLAY_MAX_X) - race_SPECTATOR_ARENA_MARGIN;
+const race_ARENA_MAX_X = Math.max(TRACK_PLAY_MIN_X, TRACK_PLAY_MAX_X) + race_SPECTATOR_ARENA_MARGIN;
+const race_ARENA_MIN_Z = Math.min(TRACK_PLAY_MIN_Z, TRACK_PLAY_MAX_Z) - race_SPECTATOR_ARENA_MARGIN;
+const race_ARENA_MAX_Z = Math.max(TRACK_PLAY_MIN_Z, TRACK_PLAY_MAX_Z) + race_SPECTATOR_ARENA_MARGIN;
+const race_SPECTATOR_SPAWN_CENTER_X = race_ARENA_MIN_X - 10;
+const race_SPECTATOR_SPAWN_CENTER_Z = race_ARENA_MIN_Z - 10;
+const race_SPECTATOR_SPAWN_MIN_RADIUS = 2.6;
+const race_SPECTATOR_SPAWN_MAX_RADIUS = 6.4;
 
 const rooms = new Map();
-const roomQuizConfigCache = new Map();
-let latestQuizConfigSnapshot = null;
+const roomraceConfigCache = new Map();
+let latestraceConfigSnapshot = null;
 let playerCount = 0;
 
-function createQuizState() {
+function createraceState() {
   return {
     active: false,
     phase: "idle",
@@ -249,16 +300,13 @@ function createQuizState() {
     startedAt: 0,
     prepareEndsAt: 0,
     endedAt: 0,
-    questionIndex: -1,
-    totalQuestions: 0,
-    currentQuestion: null,
-    questions: [],
-    lockSeconds: QUIZ_DEFAULT_LOCK_SECONDS,
+    lockSeconds: race_DEFAULT_LOCK_SECONDS,
     lockAt: 0,
     lockResolveAt: 0,
     lockTimer: null,
     nextTimer: null,
-    lastResult: null
+    seatTimer: null,
+    seatScheduledAt: 0
   };
 }
 
@@ -281,23 +329,17 @@ function createRoom(code, persistent = false) {
     chatHistory: [],
     persistent,
     createdAt: Date.now(),
-    quizConfig: {
-      questions: FALLBACK_QUIZ_QUESTIONS.map((question, index) => ({
-        id: String(question?.id ?? `Q${index + 1}`),
-        text: String(question?.text ?? "").slice(0, QUIZ_TEXT_MAX_LENGTH),
-        answer: normalizeQuizAnswer(question?.answer) ?? "O",
-        explanation: String(question?.explanation ?? "").slice(0, QUIZ_EXPLANATION_MAX_LENGTH),
-        timeLimitSeconds: sanitizeQuizLockSeconds(question?.timeLimitSeconds ?? question?.lockSeconds)
-      })),
+    raceConfig: {
+      seatMode: TRACK_SEAT_DEFAULT_MODE,
       endPolicy: {
         autoFinish: true,
         showOppositeBillboard: true
       }
     },
-    quiz: createQuizState(),
+    race: createraceState(),
     tick: 0
   };
-  applyCachedQuizConfigToRoom(room);
+  applyCachedraceConfigToRoom(room);
   return room;
 }
 
@@ -438,41 +480,25 @@ if (WORKER_SINGLE_ROOM_MODE && !rooms.has(WORKER_FIXED_ROOM_CODE)) {
   createMatchRoom(WORKER_FIXED_ROOM_CODE, true);
 }
 
-function getRoomQuiz(room) {
+function getRoomrace(room) {
   if (!room || typeof room !== "object") {
-    return createQuizState();
+    return createraceState();
   }
-  if (!room.quiz || typeof room.quiz !== "object") {
-    room.quiz = createQuizState();
+  if (!room.race || typeof room.race !== "object") {
+    room.race = createraceState();
   }
-  return room.quiz;
+  return room.race;
 }
 
-function getDefaultQuizConfigQuestions() {
-  return FALLBACK_QUIZ_QUESTIONS.map((question, index) => ({
-    id: String(question?.id ?? `Q${index + 1}`),
-    text: String(question?.text ?? "").slice(0, QUIZ_TEXT_MAX_LENGTH) || `Question ${index + 1}`,
-    answer: normalizeQuizAnswer(question?.answer) ?? "O",
-    explanation: String(question?.explanation ?? "").slice(0, QUIZ_EXPLANATION_MAX_LENGTH),
-    timeLimitSeconds: sanitizeQuizLockSeconds(question?.timeLimitSeconds ?? question?.lockSeconds)
-  }));
-}
-
-function cloneQuizConfig(rawConfig = null) {
+function cloneraceConfig(rawConfig = null) {
   const source = rawConfig && typeof rawConfig === "object" ? rawConfig : {};
-  const questions = sanitizeQuizQuestions(source.questions, {
-    fallbackToDefault: true,
-    minQuestions: 1,
-    maxQuestions: QUIZ_MAX_QUESTIONS
-  }).map((question) => ({
-    id: String(question?.id ?? "").slice(0, 24),
-    text: String(question?.text ?? "").slice(0, QUIZ_TEXT_MAX_LENGTH),
-    answer: normalizeQuizAnswer(question?.answer) ?? "O",
-    explanation: String(question?.explanation ?? "").slice(0, QUIZ_EXPLANATION_MAX_LENGTH),
-    timeLimitSeconds: sanitizeQuizLockSeconds(question?.timeLimitSeconds ?? question?.lockSeconds)
-  }));
+  const normalizedSeatMode =
+    String(source?.seatMode ?? TRACK_SEAT_DEFAULT_MODE).trim().toLowerCase() === "manual" &&
+    TRACK_SEAT_ALLOW_MANUAL_OPTION
+      ? "manual"
+      : "auto";
   return {
-    questions,
+    seatMode: normalizedSeatMode,
     endPolicy: {
       autoFinish: source?.endPolicy?.autoFinish !== false,
       showOppositeBillboard: source?.endPolicy?.showOppositeBillboard !== false
@@ -480,80 +506,80 @@ function cloneQuizConfig(rawConfig = null) {
   };
 }
 
-function trimRoomQuizConfigCache() {
-  while (roomQuizConfigCache.size > ROOM_QUIZ_CONFIG_CACHE_LIMIT) {
-    const oldestKey = roomQuizConfigCache.keys().next().value;
+function trimRoomraceConfigCache() {
+  while (roomraceConfigCache.size > ROOM_race_CONFIG_CACHE_LIMIT) {
+    const oldestKey = roomraceConfigCache.keys().next().value;
     if (!oldestKey) {
       break;
     }
-    roomQuizConfigCache.delete(oldestKey);
+    roomraceConfigCache.delete(oldestKey);
   }
 }
 
-function rememberRoomQuizConfig(room) {
+function rememberRoomraceConfig(room) {
   if (!room || typeof room !== "object") {
     return;
   }
   const code = sanitizeRoomCode(room.code);
-  const snapshot = cloneQuizConfig(room.quizConfig);
+  const snapshot = cloneraceConfig(room.raceConfig);
   if (code) {
-    roomQuizConfigCache.set(code, snapshot);
-    trimRoomQuizConfigCache();
+    roomraceConfigCache.set(code, snapshot);
+    trimRoomraceConfigCache();
   }
-  latestQuizConfigSnapshot = snapshot;
+  latestraceConfigSnapshot = snapshot;
 }
 
-function resolveCachedQuizConfigForRoom(roomCode) {
+function resolveCachedraceConfigForRoom(roomCode) {
   const code = sanitizeRoomCode(roomCode);
-  if (code && roomQuizConfigCache.has(code)) {
-    return cloneQuizConfig(roomQuizConfigCache.get(code));
+  if (code && roomraceConfigCache.has(code)) {
+    return cloneraceConfig(roomraceConfigCache.get(code));
   }
   if (
-    latestQuizConfigSnapshot &&
-    (WORKER_SINGLE_ROOM_MODE || ROOM_OWNER_KEY || roomQuizConfigCache.size <= 1)
+    latestraceConfigSnapshot &&
+    (WORKER_SINGLE_ROOM_MODE || ROOM_OWNER_KEY || roomraceConfigCache.size <= 1)
   ) {
-    return cloneQuizConfig(latestQuizConfigSnapshot);
+    return cloneraceConfig(latestraceConfigSnapshot);
   }
   return null;
 }
 
-function applyCachedQuizConfigToRoom(room) {
+function applyCachedraceConfigToRoom(room) {
   if (!room || typeof room !== "object") {
     return;
   }
-  const cached = resolveCachedQuizConfigForRoom(room.code);
+  const cached = resolveCachedraceConfigForRoom(room.code);
   if (!cached) {
     return;
   }
-  room.quizConfig = cached;
+  room.raceConfig = cached;
 }
 
-function ensureRoomQuizConfig(room) {
+function ensureRoomraceConfig(room) {
   if (!room || typeof room !== "object") {
     return {
-      questions: getDefaultQuizConfigQuestions(),
+      seatMode: TRACK_SEAT_DEFAULT_MODE,
       endPolicy: { autoFinish: true, showOppositeBillboard: true }
     };
   }
-  if (!room.quizConfig || typeof room.quizConfig !== "object") {
-    room.quizConfig = {
-      questions: getDefaultQuizConfigQuestions(),
+  if (!room.raceConfig || typeof room.raceConfig !== "object") {
+    room.raceConfig = {
+      seatMode: TRACK_SEAT_DEFAULT_MODE,
       endPolicy: { autoFinish: true, showOppositeBillboard: true }
     };
   }
-  const safeQuestions = sanitizeQuizQuestions(room.quizConfig.questions, {
-    fallbackToDefault: true,
-    minQuestions: 1,
-    maxQuestions: QUIZ_MAX_QUESTIONS
-  });
-  room.quizConfig.questions = safeQuestions;
-  if (!room.quizConfig.endPolicy || typeof room.quizConfig.endPolicy !== "object") {
-    room.quizConfig.endPolicy = { autoFinish: true, showOppositeBillboard: true };
+  if (!room.raceConfig.endPolicy || typeof room.raceConfig.endPolicy !== "object") {
+    room.raceConfig.endPolicy = { autoFinish: true, showOppositeBillboard: true };
   }
-  room.quizConfig.endPolicy.autoFinish = room.quizConfig.endPolicy.autoFinish !== false;
-  room.quizConfig.endPolicy.showOppositeBillboard =
-    room.quizConfig.endPolicy.showOppositeBillboard !== false;
-  return room.quizConfig;
+  room.raceConfig.endPolicy.autoFinish = room.raceConfig.endPolicy.autoFinish !== false;
+  room.raceConfig.endPolicy.showOppositeBillboard =
+    room.raceConfig.endPolicy.showOppositeBillboard !== false;
+  const mode =
+    String(room.raceConfig?.seatMode ?? TRACK_SEAT_DEFAULT_MODE).trim().toLowerCase() === "manual" &&
+    TRACK_SEAT_ALLOW_MANUAL_OPTION
+      ? "manual"
+      : "auto";
+  room.raceConfig.seatMode = mode;
+  return room.raceConfig;
 }
 
 function ensureRoomEntryGate(room) {
@@ -959,6 +985,469 @@ function sanitizePlayerState(raw = {}) {
   };
 }
 
+function normalizeTrackProgress(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  const mod = numeric % 1;
+  return mod < 0 ? mod + 1 : mod;
+}
+
+function wrappedProgressDelta(previousProgress, nextProgress) {
+  const previous = normalizeTrackProgress(previousProgress);
+  const next = normalizeTrackProgress(nextProgress);
+  const direct = Math.abs(next - previous);
+  return Math.min(direct, Math.abs(1 - direct));
+}
+
+function projectStateToTrackProgress(state = {}) {
+  if (!TRACK_PROGRESS_READY) {
+    return {
+      progress: 0,
+      distance: Number.POSITIVE_INFINITY,
+      segmentIndex: 0,
+      distanceAlong: 0
+    };
+  }
+  return projectPointToCenterlineProgress(
+    {
+      x: Number(state?.x) || 0,
+      y: 0,
+      z: Number(state?.z) || 0
+    },
+    TRACK_CENTERLINE_METRICS
+  );
+}
+
+function resolveNextTrackCheckpointIndex(progress) {
+  if (!Array.isArray(TRACK_CHECKPOINT_PROGRESS_VALUES) || TRACK_CHECKPOINT_PROGRESS_VALUES.length <= 0) {
+    return 0;
+  }
+  const normalized = normalizeTrackProgress(progress);
+  for (let index = 0; index < TRACK_CHECKPOINT_PROGRESS_VALUES.length; index += 1) {
+    const checkpoint = Number(TRACK_CHECKPOINT_PROGRESS_VALUES[index]);
+    if (!Number.isFinite(checkpoint)) {
+      continue;
+    }
+    if (normalized + 1e-9 < checkpoint) {
+      return index;
+    }
+  }
+  return 0;
+}
+
+function getCheckpointCount() {
+  return Array.isArray(TRACK_CHECKPOINT_PROGRESS_VALUES) ? TRACK_CHECKPOINT_PROGRESS_VALUES.length : 0;
+}
+
+function normalizeCheckpointIndex(rawIndex) {
+  const count = getCheckpointCount();
+  if (count <= 0) {
+    return 0;
+  }
+  const index = Math.trunc(Number(rawIndex) || 0);
+  const mod = index % count;
+  return mod < 0 ? mod + count : mod;
+}
+
+function resolveCheckpointProgressByIndex(rawIndex) {
+  const count = getCheckpointCount();
+  if (count <= 0) {
+    return 0;
+  }
+  const checkpoint = Number(TRACK_CHECKPOINT_PROGRESS_VALUES[normalizeCheckpointIndex(rawIndex)]);
+  return normalizeTrackProgress(Number.isFinite(checkpoint) ? checkpoint : 0);
+}
+
+function resolvePreviousCheckpointIndex(nextCheckpointIndex) {
+  const count = getCheckpointCount();
+  if (count <= 0) {
+    return 0;
+  }
+  return normalizeCheckpointIndex(nextCheckpointIndex - 1);
+}
+
+function resolveCheckpointAnchorFromProgress(progress) {
+  const nextIndex = resolveNextTrackCheckpointIndex(progress);
+  const checkpointIndex = resolvePreviousCheckpointIndex(nextIndex);
+  return {
+    checkpointIndex,
+    checkpointProgress: resolveCheckpointProgressByIndex(checkpointIndex)
+  };
+}
+
+function sampleCenterlineAtProgress(progress, lateralOffset = 0) {
+  if (!TRACK_PROGRESS_READY) {
+    return {
+      x: 0,
+      y: 0,
+      z: 0,
+      yaw: 0,
+      segmentIndex: 0
+    };
+  }
+  const normalized = normalizeTrackProgress(progress);
+  const totalLength = Math.max(1e-6, Number(TRACK_CENTERLINE_METRICS?.totalLength) || 0);
+  const points = Array.isArray(TRACK_CENTERLINE_METRICS?.points) ? TRACK_CENTERLINE_METRICS.points : [];
+  const segmentLengths = Array.isArray(TRACK_CENTERLINE_METRICS?.segmentLengths)
+    ? TRACK_CENTERLINE_METRICS.segmentLengths
+    : [];
+  const cumulative = Array.isArray(TRACK_CENTERLINE_METRICS?.cumulative)
+    ? TRACK_CENTERLINE_METRICS.cumulative
+    : [0];
+  if (points.length < 2 || segmentLengths.length <= 0 || cumulative.length <= 1) {
+    return {
+      x: 0,
+      y: 0,
+      z: 0,
+      yaw: 0,
+      segmentIndex: 0
+    };
+  }
+  const distanceAlong = normalized * totalLength;
+  let segmentIndex = 0;
+  while (
+    segmentIndex < segmentLengths.length - 1 &&
+    Number(cumulative[segmentIndex + 1] || 0) < distanceAlong
+  ) {
+    segmentIndex += 1;
+  }
+  const start = points[segmentIndex];
+  const end = points[segmentIndex + 1] ?? start;
+  const segmentLength = Math.max(1e-6, Number(segmentLengths[segmentIndex]) || 1);
+  const segmentStartDistance = Number(cumulative[segmentIndex] || 0);
+  const localT = Math.max(0, Math.min(1, (distanceAlong - segmentStartDistance) / segmentLength));
+  const forwardX = Number(end?.x || 0) - Number(start?.x || 0);
+  const forwardZ = Number(end?.z || 0) - Number(start?.z || 0);
+  const forwardLength = Math.max(1e-6, Math.hypot(forwardX, forwardZ));
+  const tangentX = forwardX / forwardLength;
+  const tangentZ = forwardZ / forwardLength;
+  const rightX = tangentZ;
+  const rightZ = -tangentX;
+  const baseX = Number(start?.x || 0) + forwardX * localT;
+  const baseZ = Number(start?.z || 0) + forwardZ * localT;
+  return {
+    x: Number((baseX + rightX * Number(lateralOffset || 0)).toFixed(3)),
+    y: Number(start?.y || 0),
+    z: Number((baseZ + rightZ * Number(lateralOffset || 0)).toFixed(3)),
+    yaw: Math.atan2(tangentX, tangentZ),
+    segmentIndex
+  };
+}
+
+function buildTrackPenaltyRespawnState(progressState, reason = "track-anti-cheat") {
+  const fallbackProgress = normalizeTrackProgress(progressState?.progress);
+  const anchorProgress = Number.isFinite(Number(progressState?.lastCheckpointProgress))
+    ? normalizeTrackProgress(progressState.lastCheckpointProgress)
+    : fallbackProgress;
+  const respawnProgress = normalizeTrackProgress(anchorProgress - TRACK_RESPAWN_BACKTRACK_PROGRESS);
+  const sampled = sampleCenterlineAtProgress(respawnProgress, TRACK_RESPAWN_LATERAL_OFFSET);
+  const yaw = Number.isFinite(Number(sampled?.yaw)) ? Number(sampled.yaw) : 0;
+  return sanitizePlayerState({
+    x: Number(sampled?.x) || 0,
+    y: ADMISSION_SPAWN_Y,
+    z: Number(sampled?.z) || 0,
+    yaw,
+    pitch: -0.03,
+    reason
+  });
+}
+
+function createPlayerTrackProgressState(seed = {}) {
+  const base = createProgressState(seed);
+  const progress = normalizeTrackProgress(seed?.progress ?? base.lastProgress);
+  const checkpointAnchor = resolveCheckpointAnchorFromProgress(progress);
+  const lastCheckpointIndex = Number.isFinite(Number(seed?.lastCheckpointIndex))
+    ? normalizeCheckpointIndex(seed.lastCheckpointIndex)
+    : checkpointAnchor.checkpointIndex;
+  const lastCheckpointProgress = Number.isFinite(Number(seed?.lastCheckpointProgress))
+    ? normalizeTrackProgress(seed.lastCheckpointProgress)
+    : checkpointAnchor.checkpointProgress;
+  return {
+    lap: Math.max(0, Math.trunc(Number(seed?.lap ?? base.lap) || 0)),
+    lastProgress: progress,
+    progress,
+    unwrappedProgress: Number(seed?.unwrappedProgress ?? base.unwrappedProgress) || 0,
+    nextCheckpointIndex: Math.max(
+      0,
+      Math.trunc(Number(seed?.nextCheckpointIndex ?? base.nextCheckpointIndex) || 0)
+    ),
+    distanceToCenterline: Math.max(0, Number(seed?.distanceToCenterline) || 0),
+    segmentIndex: Math.max(0, Math.trunc(Number(seed?.segmentIndex) || 0)),
+    offTrack: seed?.offTrack === true,
+    updatedAt: Math.max(0, Math.trunc(Number(seed?.updatedAt) || 0)),
+    lastSelfEmitAt: Math.max(0, Math.trunc(Number(seed?.lastSelfEmitAt) || 0)),
+    lastRoomEmitAt: Math.max(0, Math.trunc(Number(seed?.lastRoomEmitAt) || 0)),
+    lastSelfEmitProgress: normalizeTrackProgress(seed?.lastSelfEmitProgress ?? progress),
+    lastRoomEmitProgress: normalizeTrackProgress(seed?.lastRoomEmitProgress ?? progress),
+    lastWrongWayAt: Math.max(0, Math.trunc(Number(seed?.lastWrongWayAt) || 0)),
+    lastCuttingAt: Math.max(0, Math.trunc(Number(seed?.lastCuttingAt) || 0)),
+    lastCheckpointIndex,
+    lastCheckpointProgress,
+    lastCheckpointAt: Math.max(0, Math.trunc(Number(seed?.lastCheckpointAt) || 0)),
+    antiCheatWrongWayStrikes: Math.max(0, Math.trunc(Number(seed?.antiCheatWrongWayStrikes) || 0)),
+    antiCheatCuttingStrikes: Math.max(0, Math.trunc(Number(seed?.antiCheatCuttingStrikes) || 0)),
+    lastPenaltyResetAt: Math.max(0, Math.trunc(Number(seed?.lastPenaltyResetAt) || 0)),
+    lastPenaltyReason: String(seed?.lastPenaltyReason ?? "")
+  };
+}
+
+function ensurePlayerTrackProgressState(player) {
+  if (!player || typeof player !== "object") {
+    return createPlayerTrackProgressState();
+  }
+  if (!player.trackProgress || typeof player.trackProgress !== "object") {
+    const projected = projectStateToTrackProgress(player.state ?? {});
+    player.trackProgress = createPlayerTrackProgressState({
+      lap: 0,
+      lastProgress: projected.progress,
+      progress: projected.progress,
+      unwrappedProgress: projected.progress,
+      nextCheckpointIndex: resolveNextTrackCheckpointIndex(projected.progress),
+      distanceToCenterline: projected.distance,
+      segmentIndex: projected.segmentIndex,
+      offTrack: projected.distance > TRACK_PROGRESS_MAX_DISTANCE,
+      updatedAt: Date.now()
+    });
+  }
+  return player.trackProgress;
+}
+
+function resetPlayerTrackProgressState(player, stateOverride = null, preserveLap = false) {
+  if (!player || typeof player !== "object") {
+    return createPlayerTrackProgressState();
+  }
+  const previous = ensurePlayerTrackProgressState(player);
+  const nextState = stateOverride ?? player.state ?? sanitizePlayerState();
+  const projected = projectStateToTrackProgress(nextState);
+  const lap = preserveLap ? Math.max(0, Math.trunc(Number(previous?.lap) || 0)) : 0;
+  const progress = normalizeTrackProgress(projected.progress);
+  const checkpointAnchor = resolveCheckpointAnchorFromProgress(progress);
+  const now = Date.now();
+  player.trackProgress = createPlayerTrackProgressState({
+    ...previous,
+    lap,
+    lastProgress: progress,
+    progress,
+    unwrappedProgress: lap + progress,
+    nextCheckpointIndex: resolveNextTrackCheckpointIndex(progress),
+    distanceToCenterline: projected.distance,
+    segmentIndex: projected.segmentIndex,
+    offTrack: projected.distance > TRACK_PROGRESS_MAX_DISTANCE,
+    updatedAt: now,
+    lastCheckpointIndex: checkpointAnchor.checkpointIndex,
+    lastCheckpointProgress: checkpointAnchor.checkpointProgress,
+    lastCheckpointAt: now,
+    antiCheatWrongWayStrikes: 0,
+    antiCheatCuttingStrikes: 0
+  });
+  return player.trackProgress;
+}
+
+function buildRaceProgressPayload(player, events = [], forwardDelta = 0) {
+  const progressState = ensurePlayerTrackProgressState(player);
+  const safeEvents = Array.isArray(events) ? events : [];
+  return {
+    id: player?.id ?? null,
+    name: player?.name ?? "PLAYER",
+    lap: Math.max(0, Math.trunc(Number(progressState?.lap) || 0)),
+    progress: Number((normalizeTrackProgress(progressState?.progress)).toFixed(6)),
+    nextCheckpointIndex: Math.max(0, Math.trunc(Number(progressState?.nextCheckpointIndex) || 0)),
+    distanceToCenterline: Number((Math.max(0, Number(progressState?.distanceToCenterline) || 0)).toFixed(3)),
+    segmentIndex: Math.max(0, Math.trunc(Number(progressState?.segmentIndex) || 0)),
+    offTrack: progressState?.offTrack === true,
+    forwardDelta: Number((Number(forwardDelta) || 0).toFixed(6)),
+    events: safeEvents,
+    updatedAt: Number(progressState?.updatedAt || Date.now())
+  };
+}
+
+function maybeEmitPlayerRaceProgress(room, player, sourceSocket = null) {
+  if (!TRACK_PROGRESS_READY || !room || !player) {
+    return null;
+  }
+  if (player.admitted !== true || player.alive === false || isPlayerHostModerator(room, player)) {
+    return null;
+  }
+
+  const progressState = ensurePlayerTrackProgressState(player);
+  const race = getRoomrace(room);
+  const raceActive = Boolean(race?.active);
+  const projected = projectStateToTrackProgress(player.state ?? {});
+  const previousOffTrack = progressState.offTrack === true;
+  const offTrack = projected.distance > TRACK_PROGRESS_MAX_DISTANCE;
+  const now = Date.now();
+
+  let events = [];
+  let forwardDelta = 0;
+
+  if (!offTrack) {
+    const judged = judgeProgressTransition(progressState, projected.progress, {
+      track: ACTIVE_TRACK_BLUEPRINT
+    });
+    progressState.lap = Math.max(0, Math.trunc(Number(judged?.state?.lap) || 0));
+    progressState.lastProgress = normalizeTrackProgress(judged?.state?.lastProgress);
+    progressState.progress = progressState.lastProgress;
+    progressState.unwrappedProgress = Number(judged?.state?.unwrappedProgress) || progressState.unwrappedProgress;
+    progressState.nextCheckpointIndex = Math.max(
+      0,
+      Math.trunc(Number(judged?.state?.nextCheckpointIndex) || progressState.nextCheckpointIndex)
+    );
+    events = Array.isArray(judged?.events) ? judged.events : [];
+    forwardDelta = Number(judged?.forwardDelta) || 0;
+  } else {
+    const nextProgress = normalizeTrackProgress(projected.progress);
+    progressState.lastProgress = nextProgress;
+    progressState.progress = nextProgress;
+    progressState.nextCheckpointIndex = resolveNextTrackCheckpointIndex(nextProgress);
+  }
+
+  progressState.distanceToCenterline = Math.max(0, Number(projected.distance) || 0);
+  progressState.segmentIndex = Math.max(0, Math.trunc(Number(projected.segmentIndex) || 0));
+  progressState.offTrack = offTrack;
+  progressState.updatedAt = now;
+
+  const latestCheckpointEvent = events
+    .filter((entry) => String(entry?.type ?? "") === "checkpoint")
+    .at(-1);
+  if (latestCheckpointEvent) {
+    const checkpointIndex = normalizeCheckpointIndex(latestCheckpointEvent?.checkpointIndex ?? 0);
+    progressState.lastCheckpointIndex = checkpointIndex;
+    progressState.lastCheckpointProgress = resolveCheckpointProgressByIndex(checkpointIndex);
+    progressState.lastCheckpointAt = now;
+  }
+
+  if (events.some((entry) => entry?.type === "wrong-way")) {
+    progressState.lastWrongWayAt = now;
+  }
+  if (events.some((entry) => entry?.type === "possible-cutting")) {
+    progressState.lastCuttingAt = now;
+  }
+
+  const strongWrongWay =
+    events.some((entry) => String(entry?.type ?? "") === "wrong-way") &&
+    Number(forwardDelta) <= -TRACK_ANTICHEAT_RESET_WRONG_WAY_DELTA;
+  if (strongWrongWay) {
+    progressState.antiCheatWrongWayStrikes = Math.max(
+      0,
+      Math.trunc(Number(progressState.antiCheatWrongWayStrikes) || 0)
+    ) + 1;
+  } else {
+    progressState.antiCheatWrongWayStrikes = Math.max(
+      0,
+      Math.trunc(Number(progressState.antiCheatWrongWayStrikes) || 0) - 1
+    );
+  }
+  const hasCuttingEvent = events.some((entry) => String(entry?.type ?? "") === "possible-cutting");
+  if (hasCuttingEvent) {
+    progressState.antiCheatCuttingStrikes = Math.max(
+      0,
+      Math.trunc(Number(progressState.antiCheatCuttingStrikes) || 0)
+    ) + 1;
+  } else {
+    progressState.antiCheatCuttingStrikes = Math.max(
+      0,
+      Math.trunc(Number(progressState.antiCheatCuttingStrikes) || 0) - 1
+    );
+  }
+
+  let antiCheatReason = "";
+  if (TRACK_ANTICHEAT_ENABLED && raceActive) {
+    if (Number(projected.distance) > TRACK_ANTICHEAT_MAX_DISTANCE) {
+      antiCheatReason = "distance";
+    } else if (
+      strongWrongWay &&
+      Number(progressState.antiCheatWrongWayStrikes) >= TRACK_ANTICHEAT_RESET_WRONG_WAY_STRIKES
+    ) {
+      antiCheatReason = "wrong-way";
+    } else if (
+      hasCuttingEvent &&
+      Number(progressState.antiCheatCuttingStrikes) >= TRACK_ANTICHEAT_RESET_CUTTING_STRIKES
+    ) {
+      antiCheatReason = "cutting";
+    }
+  }
+
+  if (antiCheatReason) {
+    const resetEvent = applyTrackAntiCheatReset(room, player, progressState, antiCheatReason, sourceSocket);
+    if (resetEvent) {
+      const resetPayload = buildRaceProgressPayload(player, [
+        {
+          type: "anti-cheat-reset",
+          reason: resetEvent.reason,
+          at: resetEvent.at
+        }
+      ]);
+      if (sourceSocket) {
+        sourceSocket.emit("race:progress:self", resetPayload);
+      }
+      io.to(room.code).emit("race:progress", {
+        ...resetPayload,
+        room: room.code
+      });
+      const refreshed = ensurePlayerTrackProgressState(player);
+      refreshed.lastSelfEmitAt = now;
+      refreshed.lastRoomEmitAt = now;
+      refreshed.lastSelfEmitProgress = resetPayload.progress;
+      refreshed.lastRoomEmitProgress = resetPayload.progress;
+      return resetPayload;
+    }
+  }
+
+  const payload = buildRaceProgressPayload(player, events, forwardDelta);
+  const roomDelta = wrappedProgressDelta(progressState.lastRoomEmitProgress, payload.progress);
+  const selfDelta = wrappedProgressDelta(progressState.lastSelfEmitProgress, payload.progress);
+  const offTrackChanged = previousOffTrack !== offTrack;
+  const hasNotableEvent =
+    offTrackChanged ||
+    events.some((entry) =>
+      ["checkpoint", "lap", "wrong-way", "possible-cutting"].includes(String(entry?.type ?? ""))
+    );
+
+  if (
+    sourceSocket &&
+    (hasNotableEvent ||
+      selfDelta >= TRACK_PROGRESS_MIN_DELTA ||
+      now - Number(progressState.lastSelfEmitAt || 0) >= TRACK_PROGRESS_SELF_EMIT_INTERVAL_MS)
+  ) {
+    sourceSocket.emit("race:progress:self", payload);
+    progressState.lastSelfEmitAt = now;
+    progressState.lastSelfEmitProgress = payload.progress;
+  }
+
+  if (
+    hasNotableEvent ||
+    (roomDelta >= TRACK_PROGRESS_MIN_DELTA &&
+      now - Number(progressState.lastRoomEmitAt || 0) >= TRACK_PROGRESS_ROOM_EMIT_INTERVAL_MS)
+  ) {
+    io.to(room.code).emit("race:progress", {
+      ...payload,
+      room: room.code
+    });
+    progressState.lastRoomEmitAt = now;
+    progressState.lastRoomEmitProgress = payload.progress;
+  }
+
+  if (events.length > 0) {
+    for (const event of events) {
+      if (String(event?.type ?? "") !== "lap") {
+        continue;
+      }
+      io.to(room.code).emit("race:lap", {
+        room: room.code,
+        id: player.id,
+        name: player.name,
+        lap: Math.max(0, Math.trunc(Number(event?.lap) || progressState.lap || 0)),
+        progress: payload.progress,
+        at: now
+      });
+    }
+  }
+
+  return payload;
+}
+
 function createPlayerNetState(initialState = sanitizePlayerState()) {
   return {
     lastAcceptedAt: Date.now(),
@@ -1005,6 +1494,9 @@ function setPlayerAuthoritativeState(player, nextState = {}) {
   net.lastAcceptedAt = Date.now();
   net.warmupSyncs = 0;
   net.lastCorrectionAt = 0;
+  if (TRACK_PROGRESS_READY) {
+    resetPlayerTrackProgressState(player, sanitized, true);
+  }
 }
 
 function buildAdmissionSpawnPoint(index, total) {
@@ -1048,18 +1540,18 @@ function hashStringToUnit(rawValue = "") {
   return hash / 4294967295;
 }
 
-function buildQuizSpectatorSpawnPoint(playerId = "") {
+function buildraceSpectatorSpawnPoint(playerId = "") {
   const id = String(playerId ?? "");
   const angle = hashStringToUnit(id) * Math.PI * 2;
   const radiusMix = hashStringToUnit(`${id}:radius`);
   const radius =
-    QUIZ_SPECTATOR_SPAWN_MIN_RADIUS +
-    (QUIZ_SPECTATOR_SPAWN_MAX_RADIUS - QUIZ_SPECTATOR_SPAWN_MIN_RADIUS) * radiusMix;
+    race_SPECTATOR_SPAWN_MIN_RADIUS +
+    (race_SPECTATOR_SPAWN_MAX_RADIUS - race_SPECTATOR_SPAWN_MIN_RADIUS) * radiusMix;
 
-  let x = QUIZ_SPECTATOR_SPAWN_CENTER_X + Math.cos(angle) * radius;
-  let z = QUIZ_SPECTATOR_SPAWN_CENTER_Z + Math.sin(angle) * radius;
-  const minSpectatorX = QUIZ_ARENA_MIN_X - QUIZ_SPECTATOR_ARENA_EXIT_PADDING;
-  const maxSpectatorZ = QUIZ_ARENA_MIN_Z - QUIZ_SPECTATOR_ARENA_EXIT_PADDING;
+  let x = race_SPECTATOR_SPAWN_CENTER_X + Math.cos(angle) * radius;
+  let z = race_SPECTATOR_SPAWN_CENTER_Z + Math.sin(angle) * radius;
+  const minSpectatorX = race_ARENA_MIN_X - race_SPECTATOR_ARENA_EXIT_PADDING;
+  const maxSpectatorZ = race_ARENA_MIN_Z - race_SPECTATOR_ARENA_EXIT_PADDING;
   if (x > minSpectatorX) {
     x = minSpectatorX;
   }
@@ -1076,38 +1568,38 @@ function buildQuizSpectatorSpawnPoint(playerId = "") {
   });
 }
 
-function isInsideQuizArena(state = {}) {
+function isInsideraceArena(state = {}) {
   const x = Number(state?.x);
   const z = Number(state?.z);
   if (!Number.isFinite(x) || !Number.isFinite(z)) {
     return false;
   }
-  return x >= QUIZ_ARENA_MIN_X && x <= QUIZ_ARENA_MAX_X && z >= QUIZ_ARENA_MIN_Z && z <= QUIZ_ARENA_MAX_Z;
+  return x >= race_ARENA_MIN_X && x <= race_ARENA_MAX_X && z >= race_ARENA_MIN_Z && z <= race_ARENA_MAX_Z;
 }
 
-function projectStateOutsideQuizArena(state = {}) {
+function projectStateOutsideraceArena(state = {}) {
   const current = sanitizePlayerState(state);
-  if (!isInsideQuizArena(current)) {
+  if (!isInsideraceArena(current)) {
     return { corrected: false, state: current };
   }
 
-  const distanceLeft = Math.abs(current.x - QUIZ_ARENA_MIN_X);
-  const distanceRight = Math.abs(QUIZ_ARENA_MAX_X - current.x);
-  const distanceBack = Math.abs(current.z - QUIZ_ARENA_MIN_Z);
-  const distanceFront = Math.abs(QUIZ_ARENA_MAX_Z - current.z);
+  const distanceLeft = Math.abs(current.x - race_ARENA_MIN_X);
+  const distanceRight = Math.abs(race_ARENA_MAX_X - current.x);
+  const distanceBack = Math.abs(current.z - race_ARENA_MIN_Z);
+  const distanceFront = Math.abs(race_ARENA_MAX_Z - current.z);
   const minDistance = Math.min(distanceLeft, distanceRight, distanceBack, distanceFront);
 
   const next = {
     ...current
   };
   if (minDistance === distanceLeft) {
-    next.x = QUIZ_ARENA_MIN_X - QUIZ_SPECTATOR_ARENA_EXIT_PADDING;
+    next.x = race_ARENA_MIN_X - race_SPECTATOR_ARENA_EXIT_PADDING;
   } else if (minDistance === distanceRight) {
-    next.x = QUIZ_ARENA_MAX_X + QUIZ_SPECTATOR_ARENA_EXIT_PADDING;
+    next.x = race_ARENA_MAX_X + race_SPECTATOR_ARENA_EXIT_PADDING;
   } else if (minDistance === distanceBack) {
-    next.z = QUIZ_ARENA_MIN_Z - QUIZ_SPECTATOR_ARENA_EXIT_PADDING;
+    next.z = race_ARENA_MIN_Z - race_SPECTATOR_ARENA_EXIT_PADDING;
   } else {
-    next.z = QUIZ_ARENA_MAX_Z + QUIZ_SPECTATOR_ARENA_EXIT_PADDING;
+    next.z = race_ARENA_MAX_Z + race_SPECTATOR_ARENA_EXIT_PADDING;
   }
   next.y = ADMISSION_SPAWN_Y;
   return {
@@ -1116,19 +1608,94 @@ function projectStateOutsideQuizArena(state = {}) {
   };
 }
 
-function isRestrictedFromQuizArena(room, player) {
+function shouldEnforceTrackBoundary(room, player) {
+  if (!TRACK_BOUNDARY?.enabled || TRACK_BOUNDARY?.useInvisibleWalls === false) {
+    return false;
+  }
   if (!room || !player) {
     return false;
   }
-  const quiz = getRoomQuiz(room);
-  const quizActive = Boolean(quiz?.active);
+  const race = getRoomrace(room);
+  if (!Boolean(race?.active)) {
+    return false;
+  }
+  if (player?.admitted !== true || player?.alive === false) {
+    return false;
+  }
+  if (isPlayerHostModerator(room, player)) {
+    return false;
+  }
+  return true;
+}
+
+function projectStateInsideTrackBoundary(state = {}) {
+  const current = sanitizePlayerState(state);
+  if (!TRACK_BOUNDARY?.enabled) {
+    return { corrected: false, state: current };
+  }
+  const margin = Math.max(0, Number(TRACK_BOUNDARY?.wallMargin) || 0);
+  const minX = Number(TRACK_BOUNDARY?.minX) + margin;
+  const maxX = Number(TRACK_BOUNDARY?.maxX) - margin;
+  const minZ = Number(TRACK_BOUNDARY?.minZ) + margin;
+  const maxZ = Number(TRACK_BOUNDARY?.maxZ) - margin;
+  const next = {
+    ...current,
+    x: Math.max(Math.min(Number(current.x), Math.max(minX, maxX)), Math.min(minX, maxX)),
+    z: Math.max(Math.min(Number(current.z), Math.max(minZ, maxZ)), Math.min(minZ, maxZ))
+  };
+  const corrected =
+    Math.abs(Number(next.x) - Number(current.x)) > 1e-6 || Math.abs(Number(next.z) - Number(current.z)) > 1e-6;
+  if (!corrected) {
+    return { corrected: false, state: current };
+  }
+  return {
+    corrected: true,
+    state: sanitizePlayerState(next)
+  };
+}
+
+function applyTrackAntiCheatReset(room, player, progressState, reason = "anti-cheat", sourceSocket = null) {
+  if (!room || !player || !progressState) {
+    return null;
+  }
+  const now = Date.now();
+  if (now - Number(progressState.lastPenaltyResetAt || 0) < TRACK_ANTICHEAT_RESET_COOLDOWN_MS) {
+    return null;
+  }
+  const targetState = buildTrackPenaltyRespawnState(progressState, reason);
+  setPlayerAuthoritativeState(player, targetState);
+  const refreshed = ensurePlayerTrackProgressState(player);
+  refreshed.lastPenaltyResetAt = now;
+  refreshed.lastPenaltyReason = String(reason ?? "anti-cheat");
+  refreshed.antiCheatWrongWayStrikes = 0;
+  refreshed.antiCheatCuttingStrikes = 0;
+  const correctionSocket = sourceSocket ?? io?.sockets?.sockets?.get(player.id);
+  if (correctionSocket) {
+    correctionSocket.emit("player:correct", {
+      state: player.state,
+      reason: `track-anti-cheat:${String(reason ?? "reset")}`
+    });
+  }
+  return {
+    reason: String(reason ?? "anti-cheat"),
+    at: now,
+    progress: Number((normalizeTrackProgress(refreshed.progress)).toFixed(6))
+  };
+}
+
+function isRestrictedFromraceArena(room, player) {
+  if (!room || !player) {
+    return false;
+  }
+  const race = getRoomrace(room);
+  const raceActive = Boolean(race?.active);
   if (player.admitted !== true) {
     return true;
   }
   if (player.alive === false) {
     return true;
   }
-  return quizActive && isPlayerHostModerator(room, player);
+  return raceActive && isPlayerHostModerator(room, player);
 }
 
 function relocatePlayerToSpectatorZone(room, player, reason = "spectator-zone") {
@@ -1136,7 +1703,7 @@ function relocatePlayerToSpectatorZone(room, player, reason = "spectator-zone") 
     return false;
   }
   const current = sanitizePlayerState(player.state ?? {});
-  const target = buildQuizSpectatorSpawnPoint(player.id);
+  const target = buildraceSpectatorSpawnPoint(player.id);
   const distance = Math.hypot(
     Number(target.x) - Number(current.x),
     Number(target.y) - Number(current.y),
@@ -1305,7 +1872,7 @@ function resolveAoiCadence(distanceSq) {
   const midSq = AOI_MID_RADIUS * AOI_MID_RADIUS;
   const farSq = AOI_FAR_RADIUS * AOI_FAR_RADIUS;
   if (distanceSq <= nearSq) {
-    return 1;
+    return AOI_NEAR_CADENCE;
   }
   if (distanceSq <= midSq) {
     return AOI_MID_CADENCE;
@@ -1316,17 +1883,17 @@ function resolveAoiCadence(distanceSq) {
   return AOI_EDGE_CADENCE;
 }
 
-function buildPackedRemoteState(player) {
-  const state = player?.state ?? {};
+function buildPackedRemoteState(player, state = null) {
+  const resolvedState = state ?? player?.state ?? {};
   return {
     id: player?.id ?? null,
     n: player?.name ?? "PLAYER",
     a: player?.alive === false ? 0 : 1,
-    px: quantizePosition(state.x),
-    py: quantizePosition(state.y),
-    pz: quantizePosition(state.z),
-    yaw: quantizeRotation(state.yaw),
-    pitch: quantizeRotation(state.pitch)
+    px: quantizePosition(resolvedState.x),
+    py: quantizePosition(resolvedState.y),
+    pz: quantizePosition(resolvedState.z),
+    yaw: quantizeRotation(resolvedState.yaw),
+    pitch: quantizeRotation(resolvedState.pitch)
   };
 }
 
@@ -1337,6 +1904,19 @@ function emitRoomDeltaSnapshot(room) {
 
   room.tick = Number(room.tick || 0) + 1;
   const players = Array.from(room.players.values());
+  const activePlayerIds = new Set();
+  const playerStates = new Map();
+  const packedStates = new Map();
+
+  for (const player of players) {
+    if (!player?.id) {
+      continue;
+    }
+    const state = player.state ?? sanitizePlayerState();
+    activePlayerIds.add(player.id);
+    playerStates.set(player.id, state);
+    packedStates.set(player.id, buildPackedRemoteState(player, state));
+  }
 
   for (const receiver of players) {
     const socket = io?.sockets?.sockets?.get(receiver.id);
@@ -1351,14 +1931,14 @@ function emitRoomDeltaSnapshot(room) {
 
     const updates = [];
     const removals = [];
-    const receiverState = receiver?.state ?? sanitizePlayerState();
+    const receiverState = playerStates.get(receiver.id) ?? sanitizePlayerState();
 
     for (const remote of players) {
       if (!remote || remote.id === receiver.id) {
         continue;
       }
 
-      const remoteState = remote.state ?? sanitizePlayerState();
+      const remoteState = playerStates.get(remote.id) ?? sanitizePlayerState();
       const dx = Number(remoteState.x) - Number(receiverState.x);
       const dz = Number(remoteState.z) - Number(receiverState.z);
       const distanceSq = dx * dx + dz * dz;
@@ -1371,7 +1951,7 @@ function emitRoomDeltaSnapshot(room) {
         continue;
       }
 
-      const packed = buildPackedRemoteState(remote);
+      const packed = packedStates.get(remote.id) ?? buildPackedRemoteState(remote, remoteState);
       const changed =
         !cached ||
         cached.px !== packed.px ||
@@ -1401,13 +1981,20 @@ function emitRoomDeltaSnapshot(room) {
       }
       updates.push(delta);
       cache.set(remote.id, {
-        ...packed,
+        id: packed.id,
+        n: packed.n,
+        a: packed.a,
+        px: packed.px,
+        py: packed.py,
+        pz: packed.pz,
+        yaw: packed.yaw,
+        pitch: packed.pitch,
         lastTick: room.tick
       });
     }
 
     for (const cachedId of Array.from(cache.keys())) {
-      if (!room.players.has(cachedId)) {
+      if (!activePlayerIds.has(cachedId)) {
         cache.delete(cachedId);
         removals.push(cachedId);
       }
@@ -1434,149 +2021,7 @@ function tickRooms() {
   }
 }
 
-function normalizeQuizAnswer(rawValue) {
-  const value = String(rawValue ?? "")
-    .trim()
-    .toUpperCase();
-  if (["O", "TRUE", "T", "YES", "Y", "1", "LEFT", "L"].includes(value)) {
-    return "O";
-  }
-  if (["X", "FALSE", "F", "NO", "N", "0", "RIGHT", "R"].includes(value)) {
-    return "X";
-  }
-  return null;
-}
-
-function sanitizeQuizLockSeconds(rawValue) {
-  const seconds = Number(rawValue);
-  if (!Number.isFinite(seconds)) {
-    return QUIZ_DEFAULT_LOCK_SECONDS;
-  }
-  return Math.max(QUIZ_MIN_LOCK_SECONDS, Math.min(QUIZ_MAX_LOCK_SECONDS, Math.round(seconds)));
-}
-
-function sanitizeQuizQuestion(rawQuestion = {}, index = 0) {
-  const answer = normalizeQuizAnswer(rawQuestion.answer ?? rawQuestion.correct ?? rawQuestion.value);
-  if (!answer) {
-    return null;
-  }
-
-  const rawText = String(rawQuestion.text ?? rawQuestion.question ?? rawQuestion.title ?? "")
-    .trim()
-    .slice(0, QUIZ_TEXT_MAX_LENGTH);
-  const text = rawText || `Question ${index + 1}`;
-
-  const idValue = String(rawQuestion.id ?? `Q${index + 1}`)
-    .trim()
-    .slice(0, 24);
-  const id = idValue || `Q${index + 1}`;
-
-  const explanation = String(
-    rawQuestion.explanation ?? rawQuestion.commentary ?? rawQuestion.desc ?? ""
-  )
-    .trim()
-    .slice(0, QUIZ_EXPLANATION_MAX_LENGTH);
-
-  const timeLimitSeconds = sanitizeQuizLockSeconds(rawQuestion.timeLimitSeconds ?? rawQuestion.lockSeconds);
-
-  return { id, text, answer, explanation, timeLimitSeconds };
-}
-
-function sanitizeQuizQuestions(
-  rawQuestions,
-  { fallbackToDefault = true, minQuestions = 1, maxQuestions = QUIZ_MAX_QUESTIONS } = {}
-) {
-  if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
-    return fallbackToDefault ? getDefaultQuizConfigQuestions() : [];
-  }
-
-  const questions = [];
-  for (let index = 0; index < rawQuestions.length; index += 1) {
-    const question = sanitizeQuizQuestion(rawQuestions[index], index);
-    if (!question) {
-      continue;
-    }
-    questions.push(question);
-    if (questions.length >= Math.max(1, Math.trunc(Number(maxQuestions) || QUIZ_MAX_QUESTIONS))) {
-      break;
-    }
-  }
-
-  if (questions.length < Math.max(0, Math.trunc(Number(minQuestions) || 0))) {
-    return fallbackToDefault ? getDefaultQuizConfigQuestions() : [];
-  }
-
-  return questions;
-}
-
-function isInsideQuizZone(bounds, x, z) {
-  const marginX = Math.min(QUIZ_ZONE_EDGE_MARGIN, bounds.width * 0.2);
-  const marginZ = Math.min(QUIZ_ZONE_EDGE_MARGIN, bounds.depth * 0.2);
-  return (
-    x >= bounds.minX + marginX &&
-    x <= bounds.maxX - marginX &&
-    z >= bounds.minZ + marginZ &&
-    z <= bounds.maxZ - marginZ
-  );
-}
-
-function resolveQuizChoiceFromState(state) {
-  const x = Number(state?.x);
-  const z = Number(state?.z);
-  if (!Number.isFinite(x) || !Number.isFinite(z)) {
-    return {
-      choice: null,
-      reason: "invalid-position",
-      x: Number.isFinite(x) ? Number(x.toFixed(3)) : null,
-      z: Number.isFinite(z) ? Number(z.toFixed(3)) : null
-    };
-  }
-
-  const inO = isInsideQuizZone(QUIZ_O_ZONE, x, z);
-  const inX = isInsideQuizZone(QUIZ_X_ZONE, x, z);
-  if (inO && !inX) {
-    return {
-      choice: "O",
-      reason: "zone-o",
-      x: Number(x.toFixed(3)),
-      z: Number(z.toFixed(3))
-    };
-  }
-  if (inX && !inO) {
-    return {
-      choice: "X",
-      reason: "zone-x",
-      x: Number(x.toFixed(3)),
-      z: Number(z.toFixed(3))
-    };
-  }
-
-  if (Math.abs(x) <= QUIZ_CENTER_DEAD_BAND) {
-    return {
-      choice: null,
-      reason: "center-line",
-      x: Number(x.toFixed(3)),
-      z: Number(z.toFixed(3))
-    };
-  }
-  if (z < QUIZ_ACTIVE_MIN_Z || z > QUIZ_ACTIVE_MAX_Z) {
-    return {
-      choice: null,
-      reason: "out-of-lane",
-      x: Number(x.toFixed(3)),
-      z: Number(z.toFixed(3))
-    };
-  }
-
-  return {
-    choice: null,
-    reason: "off-zone",
-    x: Number(x.toFixed(3)),
-    z: Number(z.toFixed(3))
-  };
-}
-
-function initializePlayerForQuiz(player, resetScore = true) {
+function initializePlayerForrace(player, resetScore = true) {
   if (!player || typeof player !== "object") {
     return;
   }
@@ -1589,6 +2034,11 @@ function initializePlayerForQuiz(player, resetScore = true) {
   player.alive = true;
   player.lastChoice = null;
   player.lastChoiceReason = null;
+  player.seatBoarded = false;
+  player.assignedVehicleId = null;
+  if (TRACK_PROGRESS_READY) {
+    resetPlayerTrackProgressState(player, player.state, false);
+  }
 }
 
 function isPlayerHostController(room, player) {
@@ -1704,13 +2154,317 @@ function countSpectatorPlayers(room) {
   return count;
 }
 
+function collectRaceParticipantIds(room, { includeWaiting = false } = {}) {
+  const ids = [];
+  for (const player of room?.players?.values?.() ?? []) {
+    if (!player) {
+      continue;
+    }
+    if (isPlayerHostModerator(room, player)) {
+      continue;
+    }
+    if (player.admitted !== true && !includeWaiting) {
+      continue;
+    }
+    const id = String(player.id ?? "").trim();
+    if (!id) {
+      continue;
+    }
+    ids.push(id);
+    if (ids.length >= ENTRY_PARTICIPANT_LIMIT) {
+      break;
+    }
+  }
+  return ids;
+}
+
+function buildRoomRaceSessionDraft(room, { includeWaiting = false } = {}) {
+  if (!room) {
+    return createRaceSessionDraft({
+      roomCode: "",
+      participantIds: [],
+      track: ACTIVE_TRACK_BLUEPRINT,
+      maxParticipants: ENTRY_PARTICIPANT_LIMIT
+    });
+  }
+  const raceConfig = ensureRoomraceConfig(room);
+  return createRaceSessionDraft({
+    roomCode: String(room?.code ?? ""),
+    participantIds: collectRaceParticipantIds(room, { includeWaiting }),
+    track: ACTIVE_TRACK_BLUEPRINT,
+    maxParticipants: ENTRY_PARTICIPANT_LIMIT,
+    seatMode: raceConfig?.seatMode ?? TRACK_SEAT_DEFAULT_MODE
+  });
+}
+
+function clearRaceSeatTimer(race) {
+  if (!race || typeof race !== "object") {
+    return;
+  }
+  if (race.seatTimer) {
+    clearTimeout(race.seatTimer);
+    race.seatTimer = null;
+  }
+  race.seatScheduledAt = 0;
+}
+
+function buildSeatStateFromAssignment(assignment = {}) {
+  const seatPosition =
+    assignment?.seatPosition && typeof assignment.seatPosition === "object"
+      ? assignment.seatPosition
+      : assignment?.spawn ?? {};
+  const headingRadians = Number(assignment?.headingRadians);
+  return sanitizePlayerState({
+    x: Number(seatPosition?.x) || 0,
+    y: Number(seatPosition?.y) || ADMISSION_SPAWN_Y,
+    z: Number(seatPosition?.z) || 0,
+    yaw: Number.isFinite(headingRadians) ? headingRadians : 0,
+    pitch: -0.03
+  });
+}
+
+function emitSeatAssignmentToPlayer(socket, room, assignment, sessionDraft, extras = {}) {
+  if (!socket || !room || !assignment || !sessionDraft) {
+    return;
+  }
+  const seatAssignment = sessionDraft?.seatAssignment ?? {};
+  const autoSeatAt = Math.max(0, Math.trunc(Number(extras?.autoSeatAt) || 0));
+  socket.emit("race:seat:assigned", {
+    room: String(room.code ?? ""),
+    reason: String(extras?.reason ?? "seat-assignment"),
+    mode: String(seatAssignment?.mode ?? "auto").toLowerCase() === "manual" ? "manual" : "auto",
+    allowManualOption: seatAssignment?.allowManualOption !== false,
+    autoSeatOnSpawn: seatAssignment?.autoSeatOnSpawn !== false,
+    autoSeatDelaySeconds: Math.max(0, Number(seatAssignment?.autoSeatDelaySeconds) || 0),
+    autoSeatReachRadius: Math.max(1.6, Number(seatAssignment?.autoSeatReachRadius) || 3.2),
+    autoSeatAt,
+    autoApplied: extras?.autoApplied === true,
+    assignment: {
+      playerId: String(assignment?.playerId ?? ""),
+      vehicleId: String(assignment?.vehicleId ?? ""),
+      seat: String(assignment?.seat ?? "driver"),
+      slotIndex: Math.max(0, Math.trunc(Number(assignment?.slotIndex) || 0)),
+      spawn: assignment?.spawn ?? null,
+      seatPosition: assignment?.seatPosition ?? null,
+      headingRadians: Number(assignment?.headingRadians) || 0
+    }
+  });
+}
+
+function resolvePlayerSeatAssignment(room, playerId, { includeWaiting = false } = {}) {
+  if (!room || !playerId) {
+    return { sessionDraft: null, assignment: null };
+  }
+  const sessionDraft = buildRoomRaceSessionDraft(room, { includeWaiting });
+  const assignments = Array.isArray(sessionDraft?.seatAssignments) ? sessionDraft.seatAssignments : [];
+  const targetId = String(playerId ?? "").trim();
+  const assignment =
+    assignments.find((item) => String(item?.playerId ?? "").trim() === targetId) ?? null;
+  return { sessionDraft, assignment };
+}
+
+function areAllAssignedPlayersBoarded(room, sessionDraft) {
+  if (!room || !sessionDraft) {
+    return false;
+  }
+  const assignments = Array.isArray(sessionDraft?.seatAssignments) ? sessionDraft.seatAssignments : [];
+  if (assignments.length <= 0) {
+    return false;
+  }
+  for (const assignment of assignments) {
+    const playerId = String(assignment?.playerId ?? "");
+    if (!playerId) {
+      continue;
+    }
+    const player = room.players.get(playerId);
+    if (!player || player.admitted !== true || player.alive === false || isPlayerHostModerator(room, player)) {
+      continue;
+    }
+    const vehicleId = String(assignment?.vehicleId ?? "");
+    if (player.seatBoarded !== true || String(player.assignedVehicleId ?? "") !== vehicleId) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function maybeAutoSeatPlayerOnReach(room, player, sourceSocket = null) {
+  if (!room || !player || player.admitted !== true || player.alive === false || isPlayerHostModerator(room, player)) {
+    return false;
+  }
+  const { sessionDraft, assignment } = resolvePlayerSeatAssignment(room, player.id, {
+    includeWaiting: false
+  });
+  if (!sessionDraft || !assignment) {
+    return false;
+  }
+  const seatAssignment = sessionDraft?.seatAssignment ?? {};
+  const seatMode = String(seatAssignment?.mode ?? "auto").trim().toLowerCase() === "manual" ? "manual" : "auto";
+  if (seatMode === "manual" || seatAssignment?.autoSeatOnReachVehicle === false) {
+    return false;
+  }
+  const assignedVehicleId = String(assignment?.vehicleId ?? "");
+  if (player.seatBoarded === true && String(player.assignedVehicleId ?? "") === assignedVehicleId) {
+    return false;
+  }
+  const seatState = buildSeatStateFromAssignment(assignment);
+  const currentState = sanitizePlayerState(player.state ?? {});
+  const distance = Math.hypot(
+    Number(seatState.x) - Number(currentState.x),
+    Number(seatState.y) - Number(currentState.y),
+    Number(seatState.z) - Number(currentState.z)
+  );
+  const reachRadius = Math.max(1.6, Number(seatAssignment?.autoSeatReachRadius) || 3.2);
+  if (distance > reachRadius) {
+    return false;
+  }
+
+  setPlayerAuthoritativeState(player, seatState);
+  player.seatBoarded = true;
+  player.assignedVehicleId = assignedVehicleId;
+  const targetSocket = sourceSocket ?? io?.sockets?.sockets?.get(player.id);
+  if (targetSocket) {
+    targetSocket.emit("player:correct", {
+      state: player.state,
+      reason: "race-auto-seat-reach"
+    });
+    emitSeatAssignmentToPlayer(targetSocket, room, assignment, sessionDraft, {
+      reason: "auto-seat-reach",
+      autoApplied: true,
+      autoSeatAt: 0
+    });
+  }
+
+  const race = getRoomrace(room);
+  if (race?.seatTimer && areAllAssignedPlayersBoarded(room, sessionDraft)) {
+    clearRaceSeatTimer(race);
+  }
+  emitRoomUpdate(room);
+  return true;
+}
+
+function applyAutoSeatNow(room, reason = "auto-seat") {
+  if (!room) {
+    return 0;
+  }
+  const race = getRoomrace(room);
+  clearRaceSeatTimer(race);
+  const sessionDraft = buildRoomRaceSessionDraft(room, { includeWaiting: false });
+  const assignments = Array.isArray(sessionDraft?.seatAssignments) ? sessionDraft.seatAssignments : [];
+  if (assignments.length <= 0) {
+    return 0;
+  }
+  let appliedCount = 0;
+  for (const assignment of assignments) {
+    const playerId = String(assignment?.playerId ?? "");
+    if (!playerId) {
+      continue;
+    }
+    const player = room.players.get(playerId);
+    if (!player || player.admitted !== true || player.alive === false || isPlayerHostModerator(room, player)) {
+      continue;
+    }
+    const assignedVehicleId = String(assignment?.vehicleId ?? "");
+    if (player.seatBoarded === true && String(player.assignedVehicleId ?? "") === assignedVehicleId) {
+      continue;
+    }
+    const seatState = buildSeatStateFromAssignment(assignment);
+    setPlayerAuthoritativeState(player, seatState);
+    player.assignedVehicleId = assignedVehicleId;
+    player.seatBoarded = true;
+    appliedCount += 1;
+    const targetSocket = io?.sockets?.sockets?.get(playerId);
+    if (targetSocket) {
+      targetSocket.emit("player:correct", {
+        state: player.state,
+        reason: "race-auto-seat"
+      });
+      emitSeatAssignmentToPlayer(targetSocket, room, assignment, sessionDraft, {
+        reason,
+        autoApplied: true,
+        autoSeatAt: 0
+      });
+    }
+  }
+  if (appliedCount > 0) {
+    emitRoomUpdate(room);
+  }
+  return appliedCount;
+}
+
+function dispatchRoomSeatAssignments(room, reason = "seat-update") {
+  if (!room) {
+    return;
+  }
+  const race = getRoomrace(room);
+  clearRaceSeatTimer(race);
+  const sessionDraft = buildRoomRaceSessionDraft(room, { includeWaiting: false });
+  const assignments = Array.isArray(sessionDraft?.seatAssignments) ? sessionDraft.seatAssignments : [];
+  if (assignments.length <= 0) {
+    return;
+  }
+
+  const seatAssignment = sessionDraft?.seatAssignment ?? {};
+  const mode = String(seatAssignment?.mode ?? "auto").trim().toLowerCase() === "manual" ? "manual" : "auto";
+  const autoSeatOnSpawn = mode !== "manual" && seatAssignment?.autoSeatOnSpawn !== false;
+  const delayMs = autoSeatOnSpawn
+    ? Math.max(0, Math.trunc((Number(seatAssignment?.autoSeatDelaySeconds) || 0) * 1000))
+    : 0;
+  const autoSeatAt = autoSeatOnSpawn ? Date.now() + delayMs : 0;
+
+  for (const assignment of assignments) {
+    const playerId = String(assignment?.playerId ?? "");
+    if (!playerId) {
+      continue;
+    }
+    const player = room.players.get(playerId);
+    if (!player || player.admitted !== true || player.alive === false || isPlayerHostModerator(room, player)) {
+      continue;
+    }
+    const assignedVehicleId = String(assignment?.vehicleId ?? "");
+    if (String(player.assignedVehicleId ?? "") !== assignedVehicleId) {
+      player.seatBoarded = false;
+    }
+    player.assignedVehicleId = assignedVehicleId;
+    const socket = io?.sockets?.sockets?.get(playerId);
+    if (!socket) {
+      continue;
+    }
+    emitSeatAssignmentToPlayer(socket, room, assignment, sessionDraft, {
+      reason,
+      autoApplied: false,
+      autoSeatAt
+    });
+  }
+
+  if (!autoSeatOnSpawn) {
+    return;
+  }
+  if (delayMs <= 0) {
+    applyAutoSeatNow(room, reason);
+    return;
+  }
+
+  race.seatScheduledAt = autoSeatAt;
+  race.seatTimer = setTimeout(() => {
+    race.seatTimer = null;
+    race.seatScheduledAt = 0;
+    const currentRoom = rooms.get(room.code);
+    if (!currentRoom) {
+      return;
+    }
+    applyAutoSeatNow(currentRoom, reason);
+  }, delayMs);
+  race.seatTimer.unref?.();
+}
+
 function openEntryGate(room) {
   if (!room) {
     return { ok: false, error: "room missing" };
   }
-  const quiz = getRoomQuiz(room);
-  if (quiz.active) {
-    return { ok: false, error: "quiz already active" };
+  const race = getRoomrace(room);
+  if (race.active) {
+    return { ok: false, error: "race already active" };
   }
   const gate = ensureRoomEntryGate(room);
   if (gate.admissionStartsAt > Date.now()) {
@@ -1728,6 +2482,8 @@ function openEntryGate(room) {
     if (!player) {
       continue;
     }
+    player.seatBoarded = false;
+    player.assignedVehicleId = null;
     if (isPlayerHostController(room, player)) {
       player.admitted = true;
       player.awaitingAdmission = false;
@@ -1755,9 +2511,9 @@ function startEntryAdmission(room) {
   if (!room) {
     return { ok: false, error: "room missing" };
   }
-  const quiz = getRoomQuiz(room);
-  if (quiz.active) {
-    return { ok: false, error: "quiz already active" };
+  const race = getRoomrace(room);
+  if (race.active) {
+    return { ok: false, error: "race already active" };
   }
   const gate = ensureRoomEntryGate(room);
   if (!gate.portalOpen) {
@@ -1844,6 +2600,8 @@ function startEntryAdmission(room) {
       player.alive = true;
       player.lastChoice = null;
       player.lastChoiceReason = "admitted";
+      player.seatBoarded = false;
+      player.assignedVehicleId = null;
       setPlayerAuthoritativeState(player, {
         x: spawn.x,
         y: spawn.y,
@@ -1871,8 +2629,9 @@ function startEntryAdmission(room) {
       participantLimit: ENTRY_PARTICIPANT_LIMIT,
       at: currentGate.lastAdmissionAt
     });
+    dispatchRoomSeatAssignments(currentRoom, "entry-admitted");
     emitRoomUpdate(currentRoom);
-    emitQuizScore(currentRoom, "lobby-admit");
+    emitraceScore(currentRoom, "lobby-admit");
   }, countdownMs);
   gate.admissionTimer.unref?.();
 
@@ -1891,54 +2650,50 @@ function startEntryAdmission(room) {
   };
 }
 
-function clearQuizAutoStartTimer(quiz) {
-  if (!quiz || typeof quiz !== "object") {
+function clearraceAutoStartTimer(race) {
+  if (!race || typeof race !== "object") {
     return;
   }
-  if (quiz.autoStartTimer) {
-    clearTimeout(quiz.autoStartTimer);
-    quiz.autoStartTimer = null;
+  if (race.autoStartTimer) {
+    clearTimeout(race.autoStartTimer);
+    race.autoStartTimer = null;
   }
-  quiz.autoStartsAt = 0;
+  race.autoStartsAt = 0;
 }
 
-function clearQuizLockTimer(quiz) {
-  if (!quiz || typeof quiz !== "object") {
+function clearraceLockTimer(race) {
+  if (!race || typeof race !== "object") {
     return;
   }
-  clearQuizAutoStartTimer(quiz);
-  if (quiz.lockTimer) {
-    clearTimeout(quiz.lockTimer);
-    quiz.lockTimer = null;
+  clearraceAutoStartTimer(race);
+  clearRaceSeatTimer(race);
+  if (race.lockTimer) {
+    clearTimeout(race.lockTimer);
+    race.lockTimer = null;
   }
-  if (quiz.nextTimer) {
-    clearTimeout(quiz.nextTimer);
-    quiz.nextTimer = null;
+  if (race.nextTimer) {
+    clearTimeout(race.nextTimer);
+    race.nextTimer = null;
   }
-  quiz.lockResolveAt = 0;
+  race.lockResolveAt = 0;
 }
 
-function resetQuizState(room) {
-  const quiz = getRoomQuiz(room);
-  clearQuizLockTimer(quiz);
+function resetraceState(room) {
+  const race = getRoomrace(room);
+  clearraceLockTimer(race);
   clearEntryAdmissionTimer(room);
-  quiz.active = false;
-  quiz.phase = "idle";
-  quiz.autoMode = false;
-  quiz.autoFinish = true;
-  quiz.autoStartsAt = 0;
-  quiz.hostId = room?.hostId ?? null;
-  quiz.startedAt = 0;
-  quiz.prepareEndsAt = 0;
-  quiz.endedAt = 0;
-  quiz.questionIndex = -1;
-  quiz.totalQuestions = 0;
-  quiz.currentQuestion = null;
-  quiz.questions = [];
-  quiz.lockSeconds = QUIZ_DEFAULT_LOCK_SECONDS;
-  quiz.lockAt = 0;
-  quiz.lockResolveAt = 0;
-  quiz.lastResult = null;
+  race.active = false;
+  race.phase = "idle";
+  race.autoMode = false;
+  race.autoFinish = true;
+  race.autoStartsAt = 0;
+  race.hostId = room?.hostId ?? null;
+  race.startedAt = 0;
+  race.prepareEndsAt = 0;
+  race.endedAt = 0;
+  race.lockSeconds = race_DEFAULT_LOCK_SECONDS;
+  race.lockAt = 0;
+  race.lockResolveAt = 0;
 }
 
 function serializeRoom(room) {
@@ -1967,20 +2722,37 @@ function serializeRoom(room) {
       admissionStartsAt: Number(gate.admissionStartsAt || 0),
       admissionInProgress: Number(gate.admissionStartsAt || 0) > Date.now()
     },
-    players: Array.from(room.players.values()).map((player) => ({
-      id: player.id,
-      name: player.name,
-      state: player.state ?? null,
-      score: Number.isFinite(Number(player.score)) ? Math.max(0, Math.trunc(Number(player.score))) : 0,
-      alive: Boolean(player.alive),
-      admitted: player.admitted !== false,
-      queuedForAdmission: player.awaitingAdmission === true,
-      spectator: isPlayerHostModerator(room, player),
-      hostParticipating: player.hostParticipating === true,
-      chatMuted: player.chatMuted === true,
-      lastChoice: player.lastChoice ?? null,
-      lastChoiceReason: player.lastChoiceReason ?? null
-    }))
+    players: Array.from(room.players.values()).map((player) => {
+      const trackProgress = ensurePlayerTrackProgressState(player);
+      return {
+        id: player.id,
+        name: player.name,
+        state: player.state ?? null,
+        score: Number.isFinite(Number(player.score)) ? Math.max(0, Math.trunc(Number(player.score))) : 0,
+        lap: Math.max(0, Math.trunc(Number(trackProgress?.lap) || 0)),
+        progress: Number((normalizeTrackProgress(trackProgress?.progress)).toFixed(6)),
+        nextCheckpointIndex: Math.max(0, Math.trunc(Number(trackProgress?.nextCheckpointIndex) || 0)),
+        offTrack: trackProgress?.offTrack === true,
+        alive: Boolean(player.alive),
+        admitted: player.admitted !== false,
+        queuedForAdmission: player.awaitingAdmission === true,
+        spectator: isPlayerHostModerator(room, player),
+        hostParticipating: player.hostParticipating === true,
+        chatMuted: player.chatMuted === true,
+        lastChoice: player.lastChoice ?? null,
+        lastChoiceReason: player.lastChoiceReason ?? null
+      };
+    }),
+    raceSession: buildRoomRaceSessionDraft(room, { includeWaiting: true }),
+    track: {
+      id: String(ACTIVE_TRACK_BLUEPRINT?.id ?? "car-race-alpha-track"),
+      progressReady: TRACK_PROGRESS_READY,
+      checkpointCount: TRACK_CHECKPOINT_PROGRESS_VALUES.length,
+      centerlinePointCount: TRACK_CENTERLINE_POINTS.length,
+      colliderSegmentCount: Number(TRACK_COLLIDER_LAYOUT?.segmentCount || 0),
+      boundaryEnabled: TRACK_BOUNDARY.enabled === true,
+      antiCheatEnabled: TRACK_ANTICHEAT_ENABLED
+    }
   };
 }
 
@@ -1994,7 +2766,7 @@ function summarizeRooms() {
       capacity: MAX_ROOM_PLAYERS,
       hostName: room.players.get(room.hostId)?.name ?? "AUTO",
       ownerPresent: roomHasOwnerPresence(room),
-      quizActive: Boolean(room.quiz?.active),
+      raceActive: Boolean(room.race?.active),
       createdAt: Number(room.createdAt || 0)
     });
   }
@@ -2108,17 +2880,23 @@ function updateHost(room) {
   return previousHostId !== room.hostId;
 }
 
-function buildQuizLeaderboard(room) {
+function buildraceLeaderboard(room) {
   const players = Array.from(room?.players?.values?.() ?? []);
   const board = players.map((player) => {
     const score = Number.isFinite(Number(player?.score)) ? Math.max(0, Math.trunc(Number(player.score))) : 0;
     const spectator = isPlayerHostModerator(room, player) || player?.admitted !== true;
+    const trackProgress = ensurePlayerTrackProgressState(player);
+    const lap = Math.max(0, Math.trunc(Number(trackProgress?.lap) || 0));
+    const progress = normalizeTrackProgress(trackProgress?.progress);
     return {
       id: player?.id,
       name: player?.name,
       score,
+      lap,
+      progress: Number(progress.toFixed(6)),
       alive: Boolean(player?.alive),
       spectator,
+      offTrack: trackProgress?.offTrack === true,
       lastChoice: player?.lastChoice ?? null,
       lastChoiceReason: player?.lastChoiceReason ?? null
     };
@@ -2127,6 +2905,12 @@ function buildQuizLeaderboard(room) {
   board.sort((left, right) => {
     if (left.spectator !== right.spectator) {
       return Number(left.spectator) - Number(right.spectator);
+    }
+    if (right.lap !== left.lap) {
+      return right.lap - left.lap;
+    }
+    if (right.progress !== left.progress) {
+      return right.progress - left.progress;
     }
     if (right.score !== left.score) {
       return right.score - left.score;
@@ -2140,18 +2924,22 @@ function buildQuizLeaderboard(room) {
   return board;
 }
 
-function buildQuizRanking(room) {
-  const leaderboard = buildQuizLeaderboard(room).filter((entry) => entry?.spectator !== true);
+function buildraceRanking(room) {
+  const leaderboard = buildraceLeaderboard(room).filter((entry) => entry?.spectator !== true);
   const ranking = [];
-  let previousScore = null;
+  let previousKey = null;
   let currentRank = 0;
 
   for (let index = 0; index < leaderboard.length; index += 1) {
     const entry = leaderboard[index];
-    const score = Number(entry?.score) || 0;
-    if (previousScore === null || score !== previousScore) {
+    const rankKey = [
+      String(Math.max(0, Number(entry?.lap) || 0)),
+      String(Number(entry?.progress || 0).toFixed(6)),
+      String(Number(entry?.score) || 0)
+    ].join(":");
+    if (previousKey === null || rankKey !== previousKey) {
       currentRank = index + 1;
-      previousScore = score;
+      previousKey = rankKey;
     }
     ranking.push({
       ...entry,
@@ -2162,7 +2950,7 @@ function buildQuizRanking(room) {
   return ranking;
 }
 
-function countQuizSurvivors(room) {
+function countraceSurvivors(room) {
   let survivors = 0;
   for (const player of room?.players?.values?.() ?? []) {
     if (isPlayerHostModerator(room, player)) {
@@ -2178,233 +2966,190 @@ function countQuizSurvivors(room) {
   return survivors;
 }
 
-function emitQuizScore(room, reason = "update", targetSocket = null) {
+function emitraceScore(room, reason = "update", targetSocket = null) {
   if (!room) {
     return;
   }
 
-  const quiz = getRoomQuiz(room);
+  const race = getRoomrace(room);
   const payload = {
     reason,
-    active: Boolean(quiz.active),
-    phase: String(quiz.phase ?? "idle"),
-    autoMode: quiz.autoMode !== false,
-    autoFinish: quiz.autoFinish !== false,
-    autoStartsAt: Number(quiz.autoStartsAt ?? 0),
-    prepareEndsAt: Number(quiz.prepareEndsAt ?? 0),
-    hostId: quiz.hostId ?? room.hostId ?? null,
-    questionIndex: Math.max(0, Number(quiz.questionIndex) + 1),
-    totalQuestions: Math.max(0, Number(quiz.totalQuestions) || 0),
-    lockAt: Number(quiz.lockAt ?? 0),
-    lockResolveAt: Number(quiz.lockResolveAt ?? 0),
-    survivors: countQuizSurvivors(room),
-    leaderboard: buildQuizLeaderboard(room),
+    active: Boolean(race.active),
+    phase: String(race.phase ?? "idle"),
+    autoMode: race.autoMode !== false,
+    autoFinish: race.autoFinish !== false,
+    autoStartsAt: Number(race.autoStartsAt ?? 0),
+    prepareEndsAt: Number(race.prepareEndsAt ?? 0),
+    hostId: race.hostId ?? room.hostId ?? null,
+    survivors: countraceSurvivors(room),
+    leaderboard: buildraceLeaderboard(room),
+    trackId: String(ACTIVE_TRACK_BLUEPRINT?.id ?? "car-race-alpha-track"),
+    progressReady: TRACK_PROGRESS_READY,
     updatedAt: Date.now()
   };
 
   if (targetSocket) {
-    targetSocket.emit("quiz:score", payload);
+    targetSocket.emit("race:score", payload);
     return;
   }
 
-  io.to(room.code).emit("quiz:score", payload);
+  io.to(room.code).emit("race:score", payload);
 }
 
-function buildQuizStartPayload(quiz) {
+function buildraceStartPayload(race) {
   return {
-    startedAt: Number(quiz.startedAt ?? Date.now()),
-    prepareEndsAt: Number(quiz.prepareEndsAt ?? 0),
-    hostId: quiz.hostId ?? null,
-    autoMode: quiz.autoMode !== false,
-    autoFinish: quiz.autoFinish !== false,
-    totalQuestions: Math.max(0, Number(quiz.totalQuestions) || 0),
-    lockSeconds: sanitizeQuizLockSeconds(quiz.lockSeconds)
+    startedAt: Number(race.startedAt ?? Date.now()),
+    prepareEndsAt: Number(race.prepareEndsAt ?? 0),
+    hostId: race.hostId ?? null,
+    autoMode: race.autoMode !== false,
+    autoFinish: race.autoFinish !== false
   };
 }
 
-function buildQuizQuestionPayload(quiz) {
-  const question = quiz.currentQuestion;
-  if (!question) {
-    return null;
-  }
-
-  return {
-    id: question.id,
-    text: question.text,
-    timeLimitSeconds: sanitizeQuizLockSeconds(question?.timeLimitSeconds),
-    index: Math.max(1, Number(quiz.questionIndex) + 1),
-    totalQuestions: Math.max(0, Number(quiz.totalQuestions) || 0),
-    lockAt: Number(quiz.lockAt ?? 0)
-  };
-}
-
-function buildQuizReviewPayload(quiz) {
-  const safeQuestions = Array.isArray(quiz?.questions) ? quiz.questions : [];
-  const rawQuestionIndex = Number(quiz?.questionIndex);
-  const resolvedQuestionIndex = Number.isFinite(rawQuestionIndex) ? Math.trunc(rawQuestionIndex) : -1;
-  const answeredCount = Math.max(
-    0,
-    Math.min(
-      safeQuestions.length,
-      resolvedQuestionIndex + 1
-    )
-  );
-  const usedQuestions = safeQuestions.slice(0, answeredCount);
-  return usedQuestions.map((question, index) => ({
-    id: String(question?.id ?? `Q${index + 1}`),
-    index: index + 1,
-    text: String(question?.text ?? "").slice(0, QUIZ_TEXT_MAX_LENGTH),
-    answer: normalizeQuizAnswer(question?.answer) ?? "O",
-    explanation: String(question?.explanation ?? "").slice(0, QUIZ_EXPLANATION_MAX_LENGTH)
-  }));
-}
-
-function buildQuizEndPayload(room, reason = "finished") {
-  const quiz = getRoomQuiz(room);
-  const ranking = buildQuizRanking(room);
+function buildraceEndPayload(room, reason = "finished") {
+  const race = getRoomrace(room);
+  const ranking = buildraceRanking(room);
   const winners = ranking.filter((entry) => Number(entry.rank) === 1);
 
   return {
     reason,
-    hostId: quiz.hostId ?? room.hostId ?? null,
-    endedAt: Number(quiz.endedAt || Date.now()),
-    questionIndex: Math.max(0, Number(quiz.questionIndex) + 1),
-    totalQuestions: Math.max(0, Number(quiz.totalQuestions) || 0),
+    hostId: race.hostId ?? room.hostId ?? null,
+    endedAt: Number(race.endedAt || Date.now()),
     winners,
     leaderboard: ranking,
-    ranking,
-    review: buildQuizReviewPayload(quiz)
+    ranking
   };
 }
 
-function buildQuizConfigPayload(room) {
-  const config = ensureRoomQuizConfig(room);
-  const questions = sanitizeQuizQuestions(config.questions, {
-    fallbackToDefault: true,
-    minQuestions: 1,
-    maxQuestions: QUIZ_MAX_QUESTIONS
-  });
-  config.questions = questions;
+function buildraceConfigPayload(room) {
+  const config = ensureRoomraceConfig(room);
   return {
-    questions: questions.map((question, index) => ({
-      id: String(question?.id ?? `Q${index + 1}`),
-      text: String(question?.text ?? "").slice(0, QUIZ_TEXT_MAX_LENGTH),
-      answer: normalizeQuizAnswer(question?.answer) ?? "O",
-      explanation: String(question?.explanation ?? "").slice(0, QUIZ_EXPLANATION_MAX_LENGTH),
-      timeLimitSeconds: sanitizeQuizLockSeconds(question?.timeLimitSeconds ?? question?.lockSeconds)
-    })),
-    slotCount: questions.length,
-    maxQuestions: QUIZ_MAX_QUESTIONS,
+    seatMode: String(config?.seatMode ?? TRACK_SEAT_DEFAULT_MODE).toLowerCase() === "manual" ? "manual" : "auto",
     endPolicy: {
       autoFinish: config?.endPolicy?.autoFinish !== false,
       showOppositeBillboard: config?.endPolicy?.showOppositeBillboard !== false
+    },
+    sessionDraft: buildRoomRaceSessionDraft(room, { includeWaiting: true }),
+    track: {
+      id: String(ACTIVE_TRACK_BLUEPRINT?.id ?? "car-race-alpha-track"),
+      progressReady: TRACK_PROGRESS_READY,
+      progressMaxDistance: Number(TRACK_PROGRESS_MAX_DISTANCE.toFixed(2)),
+      checkpointProgressValues: TRACK_CHECKPOINT_PROGRESS_VALUES,
+      centerlinePoints: TRACK_CENTERLINE_POINTS,
+      colliderSegmentCount: Number(TRACK_COLLIDER_LAYOUT?.segmentCount || 0),
+      colliderSegments: Array.isArray(TRACK_COLLIDER_LAYOUT?.segments) ? TRACK_COLLIDER_LAYOUT.segments : [],
+      networkInterest: {
+        nearRadius: AOI_NEAR_RADIUS,
+        midRadius: AOI_MID_RADIUS,
+        farRadius: AOI_FAR_RADIUS,
+        nearCadence: AOI_NEAR_CADENCE,
+        midCadence: AOI_MID_CADENCE,
+        farCadence: AOI_FAR_CADENCE,
+        edgeCadence: AOI_EDGE_CADENCE
+      },
+      boundary: {
+        enabled: TRACK_BOUNDARY.enabled === true,
+        useInvisibleWalls: TRACK_BOUNDARY.useInvisibleWalls === true,
+        minX: Number(TRACK_BOUNDARY.minX),
+        maxX: Number(TRACK_BOUNDARY.maxX),
+        minZ: Number(TRACK_BOUNDARY.minZ),
+        maxZ: Number(TRACK_BOUNDARY.maxZ),
+        wallMargin: Number(TRACK_BOUNDARY.wallMargin)
+      },
+      antiCheat: {
+        enabled: TRACK_ANTICHEAT_ENABLED,
+        maxDistanceFromCenterline: Number(TRACK_ANTICHEAT_MAX_DISTANCE.toFixed(2)),
+        wrongWayDelta: Number(TRACK_ANTICHEAT_RESET_WRONG_WAY_DELTA.toFixed(4)),
+        wrongWayStrikes: TRACK_ANTICHEAT_RESET_WRONG_WAY_STRIKES,
+        cuttingStrikes: TRACK_ANTICHEAT_RESET_CUTTING_STRIKES,
+        resetCooldownMs: TRACK_ANTICHEAT_RESET_COOLDOWN_MS
+      }
     }
   };
 }
 
-function emitQuizSnapshot(socket, room) {
+function emitraceSnapshot(socket, room) {
   if (!socket || !room) {
     return;
   }
 
-  const quiz = getRoomQuiz(room);
-  const hasAutoCountdown = Number(quiz.autoStartsAt) > Date.now();
-  if (!quiz.active && quiz.phase !== "ended" && !hasAutoCountdown) {
+  const race = getRoomrace(room);
+  const hasAutoCountdown = Number(race.autoStartsAt) > Date.now();
+  if (!race.active && race.phase !== "ended" && !hasAutoCountdown) {
     return;
   }
 
   if (hasAutoCountdown) {
-    socket.emit("quiz:auto-countdown", {
-      autoMode: quiz.autoMode !== false,
-      startsAt: Number(quiz.autoStartsAt),
-      delayMs: Math.max(0, Number(quiz.autoStartsAt) - Date.now()),
+    socket.emit("race:auto-countdown", {
+      autoMode: race.autoMode !== false,
+      startsAt: Number(race.autoStartsAt),
+      delayMs: Math.max(0, Number(race.autoStartsAt) - Date.now()),
       players: countPlayablePlayers(room),
-      minPlayers: QUIZ_AUTO_START_MIN_PLAYERS
+      minPlayers: race_AUTO_START_MIN_PLAYERS
     });
   }
 
-  if (quiz.startedAt > 0) {
-    socket.emit("quiz:start", buildQuizStartPayload(quiz));
+  if (race.startedAt > 0) {
+    socket.emit("race:start", buildraceStartPayload(race));
   }
 
-  if (quiz.phase === "question") {
-    const questionPayload = buildQuizQuestionPayload(quiz);
-    if (questionPayload) {
-      socket.emit("quiz:question", questionPayload);
-    }
-  }
-  if (quiz.phase === "lock" && quiz.currentQuestion) {
-    socket.emit("quiz:lock", {
-      id: quiz.currentQuestion.id,
-      index: Math.max(1, Number(quiz.questionIndex) + 1),
-      totalQuestions: Math.max(0, Number(quiz.totalQuestions) || 0),
-      lockedAt: Math.max(0, Number(quiz.lockResolveAt || 0) - QUIZ_LOCK_SYNC_GRACE_MS),
-      resolveAt: Number(quiz.lockResolveAt || 0),
-      graceMs: QUIZ_LOCK_SYNC_GRACE_MS
-    });
-  }
+  emitraceScore(room, "snapshot", socket);
 
-  if (quiz.lastResult) {
-    socket.emit("quiz:result", quiz.lastResult);
-  }
-
-  emitQuizScore(room, "snapshot", socket);
-
-  if (quiz.phase === "ended") {
-    socket.emit("quiz:end", buildQuizEndPayload(room, "snapshot"));
+  if (race.phase === "ended") {
+    socket.emit("race:end", buildraceEndPayload(room, "snapshot"));
   }
 }
 
-function scheduleAutoQuizStart(
+function scheduleAutoraceStart(
   room,
   {
-    delayMs = QUIZ_AUTO_START_DELAY_MS,
+    delayMs = race_AUTO_START_DELAY_MS,
     reason = "auto",
-    minPlayers = QUIZ_AUTO_START_MIN_PLAYERS
+    minPlayers = race_AUTO_START_MIN_PLAYERS
   } = {}
 ) {
   if (!room) {
     return;
   }
 
-  const quiz = getRoomQuiz(room);
-  if (quiz.autoMode === false) {
+  const race = getRoomrace(room);
+  if (race.autoMode === false) {
     return;
   }
-  if (quiz.active) {
+  if (race.active) {
     return;
   }
   const playablePlayers = countPlayablePlayers(room);
   if (playablePlayers < minPlayers) {
-    clearQuizAutoStartTimer(quiz);
+    clearraceAutoStartTimer(race);
     return;
   }
-  if (quiz.autoStartTimer) {
+  if (race.autoStartTimer) {
     return;
   }
 
-  const safeDelay = Math.max(2000, Math.trunc(Number(delayMs) || QUIZ_AUTO_START_DELAY_MS));
-  quiz.autoStartsAt = Date.now() + safeDelay;
+  const safeDelay = Math.max(2000, Math.trunc(Number(delayMs) || race_AUTO_START_DELAY_MS));
+  race.autoStartsAt = Date.now() + safeDelay;
 
-  io.to(room.code).emit("quiz:auto-countdown", {
-    autoMode: quiz.autoMode !== false,
-    startsAt: quiz.autoStartsAt,
+  io.to(room.code).emit("race:auto-countdown", {
+    autoMode: race.autoMode !== false,
+    startsAt: race.autoStartsAt,
     delayMs: safeDelay,
     reason,
     players: playablePlayers,
     minPlayers
   });
-  emitQuizScore(room, "auto-countdown");
+  emitraceScore(room, "auto-countdown");
 
-  quiz.autoStartTimer = setTimeout(() => {
-    quiz.autoStartTimer = null;
+  race.autoStartTimer = setTimeout(() => {
+    race.autoStartTimer = null;
     const currentRoom = rooms.get(room.code);
     if (!currentRoom) {
       return;
     }
-    const currentQuiz = getRoomQuiz(currentRoom);
-    currentQuiz.autoStartsAt = 0;
-    if (currentQuiz.autoMode === false || currentQuiz.active) {
+    const currentrace = getRoomrace(currentRoom);
+    currentrace.autoStartsAt = 0;
+    if (currentrace.autoMode === false || currentrace.active) {
       return;
     }
     if (countPlayablePlayers(currentRoom) < minPlayers) {
@@ -2415,432 +3160,109 @@ function scheduleAutoQuizStart(
       currentRoom.hostId && currentRoom.players.has(currentRoom.hostId)
         ? currentRoom.hostId
         : pickNextHostId(currentRoom);
-    if (!currentQuiz.hostId || !currentRoom.players.has(currentQuiz.hostId)) {
-      currentQuiz.hostId = hostId;
+    if (!currentrace.hostId || !currentRoom.players.has(currentrace.hostId)) {
+      currentrace.hostId = hostId;
     }
 
-    const started = startQuiz(currentRoom, currentQuiz.hostId ?? hostId, {
+    const started = startrace(currentRoom, currentrace.hostId ?? hostId, {
       autoMode: true,
-      autoFinish: ensureRoomQuizConfig(currentRoom)?.endPolicy?.autoFinish !== false
+      autoFinish: ensureRoomraceConfig(currentRoom)?.endPolicy?.autoFinish !== false
     });
     if (!started?.ok) {
-      scheduleAutoQuizStart(currentRoom, { delayMs: QUIZ_AUTO_START_DELAY_MS, reason: "auto-retry" });
+      scheduleAutoraceStart(currentRoom, { delayMs: race_AUTO_START_DELAY_MS, reason: "auto-retry" });
     }
   }, safeDelay);
 }
 
-function scheduleQuizLock(room, lockSeconds) {
-  const quiz = getRoomQuiz(room);
-  clearQuizLockTimer(quiz);
-
-  const safeLockSeconds = sanitizeQuizLockSeconds(lockSeconds);
-  const lockMs = safeLockSeconds * 1000;
-  quiz.lockAt = Date.now() + lockMs;
-  quiz.lockTimer = setTimeout(() => {
-    evaluateQuizQuestion(room);
-  }, lockMs);
-}
-
-function finishQuiz(room, reason = "finished") {
+function finishrace(room, reason = "finished") {
   if (!room) {
     return;
   }
 
-  const quiz = getRoomQuiz(room);
-  if (quiz.phase === "ended") {
+  const race = getRoomrace(room);
+  if (race.phase === "ended") {
     return;
   }
 
-  clearQuizLockTimer(quiz);
-  quiz.active = false;
-  quiz.phase = "ended";
-  quiz.lockAt = 0;
-  quiz.lockResolveAt = 0;
-  quiz.prepareEndsAt = 0;
-  quiz.endedAt = Date.now();
+  clearraceLockTimer(race);
+  race.active = false;
+  race.phase = "ended";
+  race.lockAt = 0;
+  race.lockResolveAt = 0;
+  race.prepareEndsAt = 0;
+  race.endedAt = Date.now();
 
-  const payload = buildQuizEndPayload(room, reason);
-  io.to(room.code).emit("quiz:end", payload);
-  emitQuizScore(room, "end");
+  const payload = buildraceEndPayload(room, reason);
+  io.to(room.code).emit("race:end", payload);
+  emitraceScore(room, "end");
 
-  // Keep post-round flow explicit: everyone returns to lobby waiting state after quiz end.
-  if (QUIZ_AUTO_OPEN_LOBBY_ON_END) {
+  // Keep post-round flow explicit: everyone returns to lobby waiting state after race end.
+  if (race_AUTO_OPEN_LOBBY_ON_END) {
     const opened = openEntryGate(room);
     if (opened?.ok) {
       emitRoomUpdate(room);
-      emitQuizScore(room, "lobby-open-auto");
+      emitraceScore(room, "lobby-open-auto");
     }
   }
 
-  if (quiz.autoMode !== false) {
-    scheduleAutoQuizStart(room, {
-      delayMs: QUIZ_AUTO_RESTART_DELAY_MS,
+  if (race.autoMode !== false) {
+    scheduleAutoraceStart(room, {
+      delayMs: race_AUTO_RESTART_DELAY_MS,
       reason: "auto-restart"
     });
   }
 }
 
-function finalizeQuizQuestion(room, lockedAt = Date.now()) {
-  if (!room) {
-    return;
-  }
-
-  const quiz = getRoomQuiz(room);
-  if (!quiz.active || quiz.phase !== "lock" || !quiz.currentQuestion) {
-    return;
-  }
-
-  clearQuizLockTimer(quiz);
-
-  const question = quiz.currentQuestion;
-  const normalizedLockedAt = Math.max(0, Math.trunc(Number(lockedAt) || Date.now()));
-  const resolvedAt = Date.now();
-
-  const correctPlayerIds = [];
-  const eliminatedPlayerIds = [];
-  const eliminatedPlayers = [];
-
-  for (const player of room.players.values()) {
-    if (!player || !player.alive) {
-      continue;
-    }
-    if (isPlayerHostModerator(room, player)) {
-      player.lastChoice = null;
-      player.lastChoiceReason = "spectator";
-      continue;
-    }
-
-    const judge = resolveQuizChoiceFromState(player.state);
-    player.lastChoice = judge.choice;
-    player.lastChoiceReason = judge.reason;
-
-    if (judge.choice === question.answer) {
-      player.score = Number.isFinite(Number(player.score)) ? Math.max(0, Math.trunc(Number(player.score))) + 1 : 1;
-      correctPlayerIds.push(player.id);
-    } else {
-      player.alive = false;
-      player.lastChoiceReason = judge.reason || "spectator";
-      relocatePlayerToSpectatorZone(room, player, "quiz-eliminated");
-      eliminatedPlayerIds.push(player.id);
-      eliminatedPlayers.push({
-        id: player.id,
-        choice: judge.choice,
-        reason: judge.reason,
-        x: judge.x,
-        z: judge.z
-      });
-    }
-  }
-
-  const survivorCount = countQuizSurvivors(room);
-  const resultPayload = {
-    id: question.id,
-    text: String(question.text ?? "").slice(0, QUIZ_TEXT_MAX_LENGTH),
-    answer: question.answer,
-    explanation: String(question.explanation ?? "").slice(0, QUIZ_EXPLANATION_MAX_LENGTH),
-    index: Math.max(1, Number(quiz.questionIndex) + 1),
-    totalQuestions: Math.max(0, Number(quiz.totalQuestions) || 0),
-    lockedAt: normalizedLockedAt,
-    resolvedAt,
-    lockGraceMs: Math.max(0, resolvedAt - normalizedLockedAt),
-    survivorCount,
-    correctPlayerIds,
-    eliminatedPlayerIds,
-    eliminatedPlayers
-  };
-
-  quiz.lastResult = resultPayload;
-  io.to(room.code).emit("quiz:result", resultPayload);
-  const autoFinish = quiz.autoFinish !== false;
-
-  if (survivorCount <= 0) {
-    if (autoFinish) {
-      finishQuiz(room, "no-survivor");
-    } else {
-      quiz.phase = "waiting-next";
-      emitQuizScore(room, "result-no-survivor-manual");
-    }
-    return;
-  }
-
-  const playablePlayers = countPlayablePlayers(room);
-  if (survivorCount === 1 && QUIZ_END_ON_SINGLE_SURVIVOR && playablePlayers > 1) {
-    if (autoFinish) {
-      finishQuiz(room, "winner");
-    } else {
-      quiz.phase = "waiting-next";
-      emitQuizScore(room, "result-winner-manual");
-    }
-    return;
-  }
-
-  if (quiz.questionIndex + 1 >= quiz.totalQuestions) {
-    if (autoFinish) {
-      finishQuiz(room, "all-questions-complete");
-    } else {
-      quiz.phase = "waiting-next";
-      emitQuizScore(room, "result-all-complete-manual");
-    }
-    return;
-  }
-
-  quiz.phase = "waiting-next";
-  emitQuizScore(room, "result");
-  scheduleQuizNextQuestion(room);
-}
-
-function evaluateQuizQuestion(room) {
-  if (!room) {
-    return false;
-  }
-
-  const quiz = getRoomQuiz(room);
-  if (!quiz.active || quiz.phase !== "question" || !quiz.currentQuestion) {
-    return false;
-  }
-
-  clearQuizLockTimer(quiz);
-
-  const question = quiz.currentQuestion;
-  const lockedAt = Date.now();
-  const resolveAt = lockedAt + QUIZ_LOCK_SYNC_GRACE_MS;
-  quiz.phase = "lock";
-  quiz.lockAt = 0;
-  quiz.lockResolveAt = resolveAt;
-
-  io.to(room.code).emit("quiz:lock", {
-    id: question.id,
-    index: Math.max(1, Number(quiz.questionIndex) + 1),
-    totalQuestions: Math.max(0, Number(quiz.totalQuestions) || 0),
-    lockedAt,
-    resolveAt,
-    graceMs: QUIZ_LOCK_SYNC_GRACE_MS
-  });
-  emitQuizScore(room, "lock");
-
-  quiz.lockTimer = setTimeout(() => {
-    finalizeQuizQuestion(room, lockedAt);
-  }, QUIZ_LOCK_SYNC_GRACE_MS);
-  return true;
-}
-
-function resetPlayersForQuestionRewind(room, reason = "quiz-prev-reset") {
-  if (!room) {
-    return;
-  }
-
-  const participants = [];
-  for (const player of room.players.values()) {
-    if (!player) {
-      continue;
-    }
-    if (isPlayerHostModerator(room, player)) {
-      player.admitted = true;
-      player.awaitingAdmission = false;
-      player.alive = true;
-      player.score = 0;
-      player.lastChoice = null;
-      player.lastChoiceReason = "spectator";
-      relocatePlayerToSpectatorZone(room, player, reason);
-      continue;
-    }
-    if (player.admitted === true) {
-      player.awaitingAdmission = false;
-      player.alive = true;
-      player.score = 0;
-      player.lastChoice = null;
-      player.lastChoiceReason = null;
-      participants.push(player);
-      continue;
-    }
-    player.admitted = false;
-    player.awaitingAdmission = false;
-    player.alive = false;
-    player.score = 0;
-    player.lastChoice = null;
-    player.lastChoiceReason = "spectator";
-    relocatePlayerToSpectatorZone(room, player, reason);
-  }
-
-  for (let index = 0; index < participants.length; index += 1) {
-    const player = participants[index];
-    const spawn = buildAdmissionSpawnPoint(index, participants.length);
-    setPlayerAuthoritativeState(player, {
-      x: spawn.x,
-      y: spawn.y,
-      z: spawn.z,
-      yaw: 0,
-      pitch: 0
-    });
-    const targetSocket = io?.sockets?.sockets?.get(player.id);
-    if (targetSocket) {
-      targetSocket.emit("player:correct", {
-        state: player.state,
-        reason
-      });
-    }
-  }
-}
-
-function rewindQuizToPreviousQuestion(room, lockSecondsOverride = null) {
-  if (!room) {
-    return { ok: false, error: "room missing" };
-  }
-
-  const quiz = getRoomQuiz(room);
-  if (!quiz.active) {
-    return { ok: false, error: "quiz is not active" };
-  }
-
-  const currentIndex = Math.max(0, Math.trunc(Number(quiz.questionIndex) || 0));
-  if (currentIndex <= 0) {
-    return { ok: false, error: "no previous question" };
-  }
-
-  const targetIndex = currentIndex - 1;
-  clearQuizLockTimer(quiz);
-  quiz.phase = "start";
-  quiz.lockAt = 0;
-  quiz.lockResolveAt = 0;
-  quiz.prepareEndsAt = 0;
-  quiz.lastResult = null;
-
-  resetPlayersForQuestionRewind(room, "quiz-prev-reset");
-  quiz.questionIndex = targetIndex - 1;
-
-  const nextResult = pushNextQuizQuestion(room, lockSecondsOverride);
-  if (!nextResult?.ok) {
-    return nextResult;
-  }
-
-  emitQuizScore(room, "previous-question");
-  return {
-    ok: true,
-    rewindTo: targetIndex + 1,
-    question: nextResult.question,
-    resetScores: true
-  };
-}
-
-function pushNextQuizQuestion(room, lockSecondsOverride = null) {
-  if (!room) {
-    return { ok: false, error: "room missing" };
-  }
-
-  const quiz = getRoomQuiz(room);
-  clearQuizLockTimer(quiz);
-  if (!quiz.active) {
-    return { ok: false, error: "quiz is not active" };
-  }
-
-  if (quiz.phase === "question") {
-    return { ok: false, error: "question is already open" };
-  }
-
-  const nextIndex = quiz.questionIndex + 1;
-  if (nextIndex >= quiz.questions.length) {
-    if (quiz.autoFinish !== false) {
-      finishQuiz(room, "all-questions-complete");
-      return { ok: false, error: "no more questions" };
-    }
-    quiz.phase = "waiting-next";
-    emitQuizScore(room, "manual-no-more-questions");
-    return { ok: false, error: "no more questions" };
-  }
-
-  const nextQuestion = quiz.questions[nextIndex];
-  quiz.questionIndex = nextIndex;
-  quiz.currentQuestion = nextQuestion;
-  quiz.phase = "question";
-  quiz.lastResult = null;
-
-  const lockSeconds = sanitizeQuizLockSeconds(
-    lockSecondsOverride == null ? nextQuestion?.timeLimitSeconds : lockSecondsOverride
-  );
-  quiz.lockSeconds = lockSeconds;
-  scheduleQuizLock(room, lockSeconds);
-
-  const questionPayload = buildQuizQuestionPayload(quiz);
-  if (!questionPayload) {
-    return { ok: false, error: "question payload build failed" };
-  }
-
-  io.to(room.code).emit("quiz:question", questionPayload);
-  emitQuizScore(room, "question");
-
-  return {
-    ok: true,
-    question: questionPayload
-  };
-}
-
-function scheduleQuizNextQuestion(room, delayMs = QUIZ_AUTO_NEXT_DELAY_MS) {
-  if (!room) {
-    return;
-  }
-  const quiz = getRoomQuiz(room);
-  if (!quiz.active || quiz.phase !== "waiting-next") {
-    return;
-  }
-  if (quiz.nextTimer) {
-    clearTimeout(quiz.nextTimer);
-    quiz.nextTimer = null;
-  }
-
-  const safeDelay = Math.max(1200, Math.trunc(Number(delayMs) || QUIZ_AUTO_NEXT_DELAY_MS));
-  quiz.nextTimer = setTimeout(() => {
-    quiz.nextTimer = null;
-    if (!quiz.active || quiz.phase !== "waiting-next") {
-      return;
-    }
-    pushNextQuizQuestion(room);
-  }, safeDelay);
-}
-
-function scheduleQuizFirstQuestion(room, delayMs = QUIZ_PREPARE_DELAY_MS) {
+function scheduleraceGoLive(room, delayMs = race_PREPARE_DELAY_MS) {
   if (!room) {
     return 0;
   }
-  const quiz = getRoomQuiz(room);
-  if (!quiz.active || quiz.phase !== "start") {
+  const race = getRoomrace(room);
+  if (!race.active || race.phase !== "start") {
     return 0;
   }
-  if (quiz.nextTimer) {
-    clearTimeout(quiz.nextTimer);
-    quiz.nextTimer = null;
+  if (race.nextTimer) {
+    clearTimeout(race.nextTimer);
+    race.nextTimer = null;
   }
 
-  const safeDelay = Math.max(1600, Math.trunc(Number(delayMs) || QUIZ_PREPARE_DELAY_MS));
-  quiz.prepareEndsAt = Date.now() + safeDelay;
-  quiz.nextTimer = setTimeout(() => {
-    quiz.nextTimer = null;
+  const safeDelay = Math.max(1600, Math.trunc(Number(delayMs) || race_PREPARE_DELAY_MS));
+  race.prepareEndsAt = Date.now() + safeDelay;
+  race.nextTimer = setTimeout(() => {
+    race.nextTimer = null;
     const currentRoom = rooms.get(room.code);
     if (!currentRoom) {
       return;
     }
-    const currentQuiz = getRoomQuiz(currentRoom);
-    if (!currentQuiz.active || currentQuiz.phase !== "start") {
+    const currentrace = getRoomrace(currentRoom);
+    if (!currentrace.active || currentrace.phase !== "start") {
       return;
     }
-    currentQuiz.prepareEndsAt = 0;
-    pushNextQuizQuestion(currentRoom);
+    currentrace.prepareEndsAt = 0;
+    currentrace.phase = "running";
+    const runningPayload = {
+      startedAt: Number(currentrace.startedAt || Date.now()),
+      runningAt: Date.now()
+    };
+    io.to(currentRoom.code).emit("race:running", runningPayload);
+    emitraceScore(currentRoom, "running");
   }, safeDelay);
 
   return safeDelay;
 }
 
-function startQuiz(room, hostSocketId, payload = {}) {
+function startrace(room, hostSocketId, payload = {}) {
   if (!room) {
     return { ok: false, error: "room missing" };
   }
 
-  const quiz = getRoomQuiz(room);
-  if (quiz.active) {
-    return { ok: false, error: "quiz already active" };
+  const race = getRoomrace(room);
+  if (race.active) {
+    return { ok: false, error: "race already active" };
   }
-  clearQuizLockTimer(quiz);
+  clearraceLockTimer(race);
   ensureRoomEntryGate(room);
-  const quizConfig = ensureRoomQuizConfig(room);
+  const raceConfig = ensureRoomraceConfig(room);
   const waitingPlayers = countWaitingPlayers(room);
   if (waitingPlayers > 0) {
     return { ok: false, error: "players waiting admission" };
@@ -2849,22 +3271,10 @@ function startQuiz(room, hostSocketId, payload = {}) {
     return { ok: false, error: "no playable players" };
   }
 
-  const questionSource = Array.isArray(payload?.questions)
-    ? payload.questions
-    : quizConfig.questions;
-  const questions = sanitizeQuizQuestions(questionSource, {
-    fallbackToDefault: true,
-    minQuestions: 1,
-    maxQuestions: QUIZ_MAX_QUESTIONS
-  });
-  const hasLockSecondsOverride = Object.prototype.hasOwnProperty.call(payload ?? {}, "lockSeconds");
-  const lockSeconds = hasLockSecondsOverride
-    ? sanitizeQuizLockSeconds(payload.lockSeconds)
-    : sanitizeQuizLockSeconds(questions[0]?.timeLimitSeconds);
   const autoMode = payload.autoMode !== false;
   const autoFinish = Object.prototype.hasOwnProperty.call(payload ?? {}, "autoFinish")
     ? payload.autoFinish !== false
-    : quizConfig?.endPolicy?.autoFinish !== false;
+    : raceConfig?.endPolicy?.autoFinish !== false;
   const resolvedHostId =
     hostSocketId && room.players.has(hostSocketId)
       ? hostSocketId
@@ -2872,31 +3282,26 @@ function startQuiz(room, hostSocketId, payload = {}) {
         ? room.hostId
         : pickNextHostId(room);
 
-  quiz.active = true;
-  quiz.phase = "start";
-  quiz.autoMode = autoMode;
-  quiz.autoFinish = autoFinish;
-  quiz.autoStartsAt = 0;
-  quiz.hostId = resolvedHostId;
-  quiz.startedAt = Date.now();
-  quiz.prepareEndsAt = 0;
-  quiz.endedAt = 0;
-  quiz.questionIndex = -1;
-  quiz.totalQuestions = questions.length;
-  quiz.currentQuestion = null;
-  quiz.questions = questions;
-  quiz.lockSeconds = lockSeconds;
-  quiz.lockAt = 0;
-  quiz.lockResolveAt = 0;
-  quiz.lastResult = null;
+  race.active = true;
+  race.phase = "start";
+  race.autoMode = autoMode;
+  race.autoFinish = autoFinish;
+  race.autoStartsAt = 0;
+  race.hostId = resolvedHostId;
+  race.startedAt = Date.now();
+  race.prepareEndsAt = 0;
+  race.endedAt = 0;
+  race.lockSeconds = race_DEFAULT_LOCK_SECONDS;
+  race.lockAt = 0;
+  race.lockResolveAt = 0;
 
   for (const player of room.players.values()) {
-    initializePlayerForQuiz(player, true);
+    initializePlayerForrace(player, true);
     if (isPlayerHostModerator(room, player)) {
       player.admitted = true;
       player.awaitingAdmission = false;
       player.lastChoiceReason = "spectator";
-      relocatePlayerToSpectatorZone(room, player, "quiz-host-spectator");
+      relocatePlayerToSpectatorZone(room, player, "race-host-spectator");
     } else {
       player.awaitingAdmission = false;
       if (player.admitted === true) {
@@ -2905,20 +3310,21 @@ function startQuiz(room, hostSocketId, payload = {}) {
         player.admitted = false;
         player.alive = false;
         player.lastChoiceReason = "spectator";
-        relocatePlayerToSpectatorZone(room, player, "quiz-spectator");
+        relocatePlayerToSpectatorZone(room, player, "race-spectator");
       }
     }
   }
 
-  const startPayload = buildQuizStartPayload(quiz);
-  const prepareDelay = scheduleQuizFirstQuestion(room, payload.prepareDelayMs);
+  dispatchRoomSeatAssignments(room, "race-start");
+  const startPayload = buildraceStartPayload(race);
+  const prepareDelay = scheduleraceGoLive(room, payload.prepareDelayMs);
   const startWithPrepare = {
     ...startPayload,
-    prepareEndsAt: Number(quiz.prepareEndsAt || Date.now() + prepareDelay),
+    prepareEndsAt: Number(race.prepareEndsAt || Date.now() + prepareDelay),
     prepareDelayMs: prepareDelay
   };
-  io.to(room.code).emit("quiz:start", startWithPrepare);
-  emitQuizScore(room, "start");
+  io.to(room.code).emit("race:start", startWithPrepare);
+  emitraceScore(room, "start");
 
   return {
     ok: true,
@@ -2926,39 +3332,39 @@ function startQuiz(room, hostSocketId, payload = {}) {
   };
 }
 
-function reconcileQuizAfterRosterChange(room, reason = "roster-change") {
+function reconcileraceAfterRosterChange(room, reason = "roster-change") {
   if (!room) {
     return;
   }
 
-  const quiz = getRoomQuiz(room);
+  const race = getRoomrace(room);
   if (room.players.size === 0) {
-    resetQuizState(room);
+    resetraceState(room);
     return;
   }
 
-  if (!quiz.hostId || !room.players.has(quiz.hostId)) {
-    quiz.hostId = room.hostId ?? pickNextHostId(room);
+  if (!race.hostId || !room.players.has(race.hostId)) {
+    race.hostId = room.hostId ?? pickNextHostId(room);
   }
 
-  if (!quiz.active) {
-    emitQuizScore(room, reason);
-    if (quiz.autoMode !== false) {
-      scheduleAutoQuizStart(room, {
-        delayMs: QUIZ_AUTO_START_DELAY_MS,
+  if (!race.active) {
+    emitraceScore(room, reason);
+    if (race.autoMode !== false) {
+      scheduleAutoraceStart(room, {
+        delayMs: race_AUTO_START_DELAY_MS,
         reason: `${reason}-auto`
       });
     }
     return;
   }
 
-  const survivors = countQuizSurvivors(room);
+  const survivors = countraceSurvivors(room);
   if (survivors <= 0) {
-    finishQuiz(room, "player-left");
+    finishrace(room, "player-left");
     return;
   }
 
-  emitQuizScore(room, reason);
+  emitraceScore(room, reason);
 }
 
 function pruneRoomPlayers(room) {
@@ -2979,11 +3385,11 @@ function pruneRoomPlayers(room) {
 
   if (changed) {
     updateHost(room);
-    reconcileQuizAfterRosterChange(room, "prune");
+    reconcileraceAfterRosterChange(room, "prune");
     if (!room.persistent && room.players.size === 0) {
-      rememberRoomQuizConfig(room);
+      rememberRoomraceConfig(room);
       clearEntryAdmissionTimer(room);
-      resetQuizState(room);
+      resetraceState(room);
       rooms.delete(room.code);
     }
   }
@@ -3018,12 +3424,12 @@ function leaveCurrentRoom(socket) {
   removeNextPriorityPlayer(room, socket.id);
   pruneRoomPlayers(room);
   updateHost(room);
-  reconcileQuizAfterRosterChange(room, "leave");
+  reconcileraceAfterRosterChange(room, "leave");
 
   if (!room.persistent && room.players.size === 0) {
-    rememberRoomQuizConfig(room);
+    rememberRoomraceConfig(room);
     clearEntryAdmissionTimer(room);
-    resetQuizState(room);
+    resetraceState(room);
     rooms.delete(room.code);
   }
 
@@ -3085,22 +3491,25 @@ function joinRoom(socket, room, nameOverride = null) {
     existing.hostParticipating = existing.hostParticipating === true;
     existing.joinedAt = Math.max(0, Math.trunc(Number(existing.joinedAt) || Date.now()));
     ensurePlayerNetState(existing);
+    ensurePlayerTrackProgressState(existing);
+    existing.seatBoarded = existing.seatBoarded === true;
+    existing.assignedVehicleId = String(existing.assignedVehicleId ?? "");
     if (socket.data.ownerClaim === true && room.hostId !== socket.id) {
       room.hostId = socket.id;
-      const quizState = getRoomQuiz(room);
-      quizState.hostId = socket.id;
+      const raceState = getRoomrace(room);
+      raceState.hostId = socket.id;
       normalizeHostParticipationState(room);
       emitRoomUpdate(room);
-      emitQuizScore(room, "owner-claim");
+      emitraceScore(room, "owner-claim");
     }
-    const quiz = getRoomQuiz(room);
+    const race = getRoomrace(room);
     const gate = ensureRoomEntryGate(room);
     if (isPlayerHostController(room, existing)) {
       existing.admitted = true;
       existing.awaitingAdmission = false;
       existing.alive = true;
       removeNextPriorityPlayer(room, existing.id);
-    } else if (quiz.active) {
+    } else if (race.active) {
       existing.admitted = false;
       existing.awaitingAdmission = false;
       existing.alive = false;
@@ -3123,23 +3532,29 @@ function joinRoom(socket, room, nameOverride = null) {
       existing.awaitingAdmission = false;
       removeNextPriorityPlayer(room, existing.id);
     }
-    if (isRestrictedFromQuizArena(room, existing)) {
+    if (existing.admitted !== true || existing.alive === false) {
+      existing.seatBoarded = false;
+      existing.assignedVehicleId = null;
+    }
+    if (isRestrictedFromraceArena(room, existing)) {
       relocatePlayerToSpectatorZone(room, existing, "join-spectator");
     }
-    if (!quiz.active && quiz.autoMode !== false) {
-      scheduleAutoQuizStart(room, {
-        delayMs: QUIZ_AUTO_START_DELAY_MS,
+    resetPlayerTrackProgressState(existing, existing.state, true);
+    if (!race.active && race.autoMode !== false) {
+      scheduleAutoraceStart(room, {
+        delayMs: race_AUTO_START_DELAY_MS,
         reason: "rejoin-auto"
       });
     }
     emitRoomUpdate(room);
-    emitQuizSnapshot(socket, room);
+    emitraceSnapshot(socket, room);
     emitChatHistorySnapshot(socket, room);
     socket.emit("player:correct", {
       state: existing?.state ?? sanitizePlayerState(),
       reason: "join-refresh"
     });
-    socket.emit("quiz:config:update", buildQuizConfigPayload(room));
+    socket.emit("race:config:update", buildraceConfigPayload(room));
+    maybeEmitPlayerRaceProgress(room, existing, socket);
     return { ok: true, room: serializeRoom(room) };
   }
 
@@ -3152,9 +3567,9 @@ function joinRoom(socket, room, nameOverride = null) {
     };
   }
 
-  const quiz = getRoomQuiz(room);
+  const race = getRoomrace(room);
   const gate = ensureRoomEntryGate(room);
-  const joinAsAlive = !quiz.active;
+  const joinAsAlive = !race.active;
   const initialState = buildPortalArrivalSpawnPoint();
 
   room.players.set(socket.id, {
@@ -3168,10 +3583,19 @@ function joinRoom(socket, room, nameOverride = null) {
     hostParticipating: false,
     isOwner: socket.data.ownerClaim === true,
     chatMuted: false,
+    seatBoarded: false,
+    assignedVehicleId: null,
     joinedAt: Date.now(),
     lastChoice: null,
     lastChoiceReason: null,
-    net: createPlayerNetState(initialState)
+    net: createPlayerNetState(initialState),
+    trackProgress: createPlayerTrackProgressState({
+      lap: 0,
+      lastProgress: 0,
+      progress: 0,
+      unwrappedProgress: 0,
+      nextCheckpointIndex: 0
+    })
   });
 
   if (socket.data.ownerClaim === true) {
@@ -3179,8 +3603,8 @@ function joinRoom(socket, room, nameOverride = null) {
   } else {
     updateHost(room);
   }
-  if (!quiz.hostId || socket.data.ownerClaim === true) {
-    quiz.hostId = room.hostId ?? socket.id;
+  if (!race.hostId || socket.data.ownerClaim === true) {
+    race.hostId = room.hostId ?? socket.id;
   }
   normalizeHostParticipationState(room);
 
@@ -3191,7 +3615,7 @@ function joinRoom(socket, room, nameOverride = null) {
       joined.awaitingAdmission = false;
       joined.alive = true;
       removeNextPriorityPlayer(room, joined.id);
-    } else if (quiz.active) {
+    } else if (race.active) {
       joined.admitted = false;
       joined.awaitingAdmission = false;
       joined.alive = false;
@@ -3210,9 +3634,14 @@ function joinRoom(socket, room, nameOverride = null) {
       joined.awaitingAdmission = false;
       removeNextPriorityPlayer(room, joined.id);
     }
-    if (isRestrictedFromQuizArena(room, joined)) {
+    if (isRestrictedFromraceArena(room, joined)) {
       relocatePlayerToSpectatorZone(room, joined, "join-spectator");
     }
+    if (joined.admitted !== true || joined.alive === false) {
+      joined.seatBoarded = false;
+      joined.assignedVehicleId = null;
+    }
+    resetPlayerTrackProgressState(joined, joined.state, false);
   }
 
   socket.join(room.code);
@@ -3227,14 +3656,17 @@ function joinRoom(socket, room, nameOverride = null) {
 
   emitRoomUpdate(room);
   emitRoomList();
-  emitQuizSnapshot(socket, room);
+  emitraceSnapshot(socket, room);
   emitChatHistorySnapshot(socket, room);
-  socket.emit("quiz:config:update", buildQuizConfigPayload(room));
-  if (quiz.active || quiz.phase === "ended") {
-    emitQuizScore(room, "join");
-  } else if (quiz.autoMode !== false) {
-    scheduleAutoQuizStart(room, {
-      delayMs: QUIZ_AUTO_START_DELAY_MS,
+  socket.emit("race:config:update", buildraceConfigPayload(room));
+  if (joined) {
+    maybeEmitPlayerRaceProgress(room, joined, socket);
+  }
+  if (race.active || race.phase === "ended") {
+    emitraceScore(room, "join");
+  } else if (race.autoMode !== false) {
+    scheduleAutoraceStart(room, {
+      delayMs: race_AUTO_START_DELAY_MS,
       reason: "join-auto"
     });
   }
@@ -3246,16 +3678,16 @@ const httpServer = createServer((req, res) => {
   if (req.url === "/health") {
     const roomsSummary = summarizeRooms();
     const totalPlayers = roomsSummary.reduce((sum, room) => sum + Number(room.count || 0), 0);
-    const activeQuizRooms = roomsSummary.filter((room) => room.quizActive).length;
+    const activeraceRooms = roomsSummary.filter((room) => room.raceActive).length;
     const topRoom = roomsSummary[0] ?? null;
-    const topRoomQuiz = topRoom ? getRoomQuiz(getRoom(topRoom.code)) : null;
+    const topRoomrace = topRoom ? getRoomrace(getRoom(topRoom.code)) : null;
     writeJson(res, 200, {
       ok: true,
       service: "reclaim-fps-chat",
       rooms: roomsSummary.length,
       online: playerCount,
       totalPlayers,
-      activeQuizRooms,
+      activeraceRooms,
       capacityPerRoom: MAX_ROOM_PLAYERS,
       participantLimit: ENTRY_PARTICIPANT_LIMIT,
       maxActiveRooms: MAX_ACTIVE_ROOMS,
@@ -3269,18 +3701,23 @@ const httpServer = createServer((req, res) => {
             capacity: topRoom.capacity,
             ownerPresent: topRoom.ownerPresent === true,
             hostName: topRoom.hostName,
-            quiz: topRoomQuiz
-              ? {
-                  active: Boolean(topRoomQuiz.active),
-                  phase: topRoomQuiz.phase,
-                  autoMode: topRoomQuiz.autoMode !== false,
-                  autoStartsAt: Number(topRoomQuiz.autoStartsAt ?? 0),
-                  questionIndex: Math.max(0, Number(topRoomQuiz.questionIndex) + 1),
-                  totalQuestions: Math.max(0, Number(topRoomQuiz.totalQuestions) || 0)
-                }
-              : null
+            race: topRoomrace
+                ? {
+                    active: Boolean(topRoomrace.active),
+                    phase: topRoomrace.phase,
+                    autoMode: topRoomrace.autoMode !== false,
+                    autoStartsAt: Number(topRoomrace.autoStartsAt ?? 0)
+                  }
+                : null
           }
         : null,
+      track: {
+        id: String(ACTIVE_TRACK_BLUEPRINT?.id ?? "car-race-alpha-track"),
+        progressReady: TRACK_PROGRESS_READY,
+        checkpointCount: TRACK_CHECKPOINT_PROGRESS_VALUES.length,
+        centerlinePointCount: TRACK_CENTERLINE_POINTS.length,
+        colliderSegmentCount: Number(TRACK_COLLIDER_LAYOUT?.segmentCount || 0)
+      },
       now: Date.now()
     });
     return;
@@ -3297,6 +3734,7 @@ const httpServer = createServer((req, res) => {
       tickRate: SERVER_TICK_RATE,
       workerSingleRoomMode: WORKER_SINGLE_ROOM_MODE,
       workerRoomCode: WORKER_SINGLE_ROOM_MODE ? WORKER_FIXED_ROOM_CODE : null,
+      trackId: String(ACTIVE_TRACK_BLUEPRINT?.id ?? "car-race-alpha-track"),
       health: "/health"
     });
     return;
@@ -3436,8 +3874,8 @@ io.on("connection", (socket) => {
 
     const sanitized = sanitizePlayerState(payload);
     const movementResult = applyAuthoritativeMovement(player, sanitized);
-    if (isRestrictedFromQuizArena(room, player)) {
-      const forcedOutside = projectStateOutsideQuizArena(player.state);
+    if (isRestrictedFromraceArena(room, player)) {
+      const forcedOutside = projectStateOutsideraceArena(player.state);
       if (forcedOutside.corrected) {
         const correctedState = forcedOutside.state;
         const correctionDistance = Math.hypot(
@@ -3455,13 +3893,40 @@ io.on("connection", (socket) => {
           net.lastCorrectionAt = now;
           socket.emit("player:correct", {
             state: player.state,
-            reason: "quiz-spectator-zone"
+            reason: "race-spectator-zone"
           });
         }
         return;
       }
     }
+    let boundaryCorrected = false;
+    if (shouldEnforceTrackBoundary(room, player)) {
+      const bounded = projectStateInsideTrackBoundary(player.state);
+      if (bounded.corrected) {
+        boundaryCorrected = true;
+        const correctedState = bounded.state;
+        const correctionDistance = Math.hypot(
+          Number(correctedState.x) - Number(player.state?.x || 0),
+          Number(correctedState.y) - Number(player.state?.y || 0),
+          Number(correctedState.z) - Number(player.state?.z || 0)
+        );
+        setPlayerAuthoritativeState(player, correctedState);
+        const now = Date.now();
+        const cooldownElapsed = now - Number(net.lastCorrectionAt || 0);
+        if (
+          correctionDistance >= SERVER_CORRECTION_MIN_DISTANCE &&
+          cooldownElapsed >= SERVER_CORRECTION_COOLDOWN_MS
+        ) {
+          net.lastCorrectionAt = now;
+          socket.emit("player:correct", {
+            state: player.state,
+            reason: "track-boundary-wall"
+          });
+        }
+      }
+    }
     if (
+      !boundaryCorrected &&
       movementResult.clamped &&
       movementResult.correctionDistance >= SERVER_CORRECTION_MIN_DISTANCE
     ) {
@@ -3475,9 +3940,13 @@ io.on("connection", (socket) => {
         });
       }
     }
+
+    maybeAutoSeatPlayerOnReach(room, player, socket);
+
+    maybeEmitPlayerRaceProgress(room, player, socket);
   });
 
-  socket.on("quiz:start", (payload = {}, ackFn) => {
+  socket.on("race:start", (payload = {}, ackFn) => {
     const roomCode = socket.data.roomCode;
     const room = roomCode ? rooms.get(roomCode) : null;
     if (!room) {
@@ -3494,7 +3963,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const started = startQuiz(room, socket.id, {
+    const started = startrace(room, socket.id, {
       ...payload,
       autoMode: false,
       prepareDelayMs: payload?.prepareDelayMs
@@ -3502,7 +3971,7 @@ io.on("connection", (socket) => {
     ack(ackFn, started);
   });
 
-  socket.on("quiz:next", (payload = {}, ackFn) => {
+  socket.on("race:stop", (payload = {}, ackFn) => {
     const roomCode = socket.data.roomCode;
     const room = roomCode ? rooms.get(roomCode) : null;
     if (!room) {
@@ -3519,83 +3988,14 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const result = pushNextQuizQuestion(room, payload.lockSeconds);
-    ack(ackFn, result);
-  });
-
-  socket.on("quiz:prev", (payload = {}, ackFn) => {
-    const roomCode = socket.data.roomCode;
-    const room = roomCode ? rooms.get(roomCode) : null;
-    if (!room) {
-      ack(ackFn, { ok: false, error: "not in room" });
+    const race = getRoomrace(room);
+    if (!race.active) {
+      ack(ackFn, { ok: false, error: "race is not active" });
       return;
     }
 
-    if (!isRoomHost(room, socket.id)) {
-      ack(ackFn, { ok: false, error: "host only" });
-      return;
-    }
-    if (ROOM_OWNER_KEY && socket.data.ownerClaim !== true) {
-      ack(ackFn, { ok: false, error: "unauthorized" });
-      return;
-    }
-
-    const rewind = rewindQuizToPreviousQuestion(room, payload?.lockSeconds);
-    ack(ackFn, rewind);
-  });
-
-  socket.on("quiz:force-lock", (ackFn) => {
-    const roomCode = socket.data.roomCode;
-    const room = roomCode ? rooms.get(roomCode) : null;
-    if (!room) {
-      ack(ackFn, { ok: false, error: "not in room" });
-      return;
-    }
-
-    if (!isRoomHost(room, socket.id)) {
-      ack(ackFn, { ok: false, error: "host only" });
-      return;
-    }
-    if (ROOM_OWNER_KEY && socket.data.ownerClaim !== true) {
-      ack(ackFn, { ok: false, error: "unauthorized" });
-      return;
-    }
-
-    const quiz = getRoomQuiz(room);
-    if (!quiz.active || quiz.phase !== "question") {
-      ack(ackFn, { ok: false, error: "question is not open" });
-      return;
-    }
-
-    evaluateQuizQuestion(room);
-    ack(ackFn, { ok: true });
-  });
-
-  socket.on("quiz:stop", (payload = {}, ackFn) => {
-    const roomCode = socket.data.roomCode;
-    const room = roomCode ? rooms.get(roomCode) : null;
-    if (!room) {
-      ack(ackFn, { ok: false, error: "not in room" });
-      return;
-    }
-
-    if (!isRoomHost(room, socket.id)) {
-      ack(ackFn, { ok: false, error: "host only" });
-      return;
-    }
-    if (ROOM_OWNER_KEY && socket.data.ownerClaim !== true) {
-      ack(ackFn, { ok: false, error: "unauthorized" });
-      return;
-    }
-
-    const quiz = getRoomQuiz(room);
-    if (!quiz.active) {
-      ack(ackFn, { ok: false, error: "quiz is not active" });
-      return;
-    }
-
-    quiz.autoMode = false;
-    finishQuiz(room, "stopped-by-host");
+    race.autoMode = false;
+    finishrace(room, "stopped-by-host");
     ack(ackFn, { ok: true });
   });
 
@@ -3613,12 +4013,12 @@ io.on("connection", (socket) => {
 
     const previousHostId = room.hostId ?? null;
     room.hostId = socket.id;
-    const quiz = getRoomQuiz(room);
-    quiz.hostId = socket.id;
+    const race = getRoomrace(room);
+    race.hostId = socket.id;
     normalizeHostParticipationState(room);
 
     emitRoomUpdate(room);
-    emitQuizScore(room, "host-claim");
+    emitraceScore(room, "host-claim");
     ack(ackFn, {
       ok: true,
       hostId: socket.id,
@@ -3648,17 +4048,21 @@ io.on("connection", (socket) => {
     if (participating) {
       player.alive = true;
       player.lastChoiceReason = null;
+      player.seatBoarded = false;
+      player.assignedVehicleId = null;
     } else {
       player.alive = true;
       player.lastChoiceReason = "spectator";
-      if (isRestrictedFromQuizArena(room, player)) {
+      player.seatBoarded = false;
+      player.assignedVehicleId = null;
+      if (isRestrictedFromraceArena(room, player)) {
         relocatePlayerToSpectatorZone(room, player, "host-spectator-toggle");
       }
     }
     normalizeHostParticipationState(room);
 
     emitRoomUpdate(room);
-    emitQuizScore(room, participating ? "host-participating-on" : "host-participating-off");
+    emitraceScore(room, participating ? "host-participating-on" : "host-participating-off");
     ack(ackFn, {
       ok: true,
       participating,
@@ -3669,7 +4073,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("quiz:state", (ackFn) => {
+  socket.on("race:state", (ackFn) => {
     const roomCode = socket.data.roomCode;
     const room = roomCode ? rooms.get(roomCode) : null;
     if (!room) {
@@ -3677,32 +4081,27 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const quiz = getRoomQuiz(room);
+    const race = getRoomrace(room);
     ack(ackFn, {
       ok: true,
-      quiz: {
-        active: Boolean(quiz.active),
-        phase: quiz.phase,
-        autoMode: quiz.autoMode !== false,
-        autoFinish: quiz.autoFinish !== false,
-        autoStartsAt: Number(quiz.autoStartsAt ?? 0),
-        prepareEndsAt: Number(quiz.prepareEndsAt ?? 0),
-        hostId: quiz.hostId ?? room.hostId ?? null,
-        questionIndex: Math.max(0, Number(quiz.questionIndex) + 1),
-        totalQuestions: Math.max(0, Number(quiz.totalQuestions) || 0),
-        lockAt: Number(quiz.lockAt ?? 0),
-        currentQuestion: buildQuizQuestionPayload(quiz),
-        lastResult: quiz.lastResult ?? null,
-        endedAt: Number(quiz.endedAt ?? 0)
+      race: {
+        active: Boolean(race.active),
+        phase: race.phase,
+        autoMode: race.autoMode !== false,
+        autoFinish: race.autoFinish !== false,
+        autoStartsAt: Number(race.autoStartsAt ?? 0),
+        prepareEndsAt: Number(race.prepareEndsAt ?? 0),
+        hostId: race.hostId ?? room.hostId ?? null,
+        endedAt: Number(race.endedAt ?? 0)
       },
       scoreboard: {
-        survivors: countQuizSurvivors(room),
-        leaderboard: buildQuizLeaderboard(room)
+        survivors: countraceSurvivors(room),
+        leaderboard: buildraceLeaderboard(room)
       }
     });
   });
 
-  socket.on("quiz:config:get", (ackFn) => {
+  socket.on("race:config:get", (ackFn) => {
     const roomCode = socket.data.roomCode;
     const room = roomCode ? rooms.get(roomCode) : null;
     if (!room) {
@@ -3711,11 +4110,11 @@ io.on("connection", (socket) => {
     }
     ack(ackFn, {
       ok: true,
-      config: buildQuizConfigPayload(room)
+      config: buildraceConfigPayload(room)
     });
   });
 
-  socket.on("quiz:config:set", (payload = {}, ackFn) => {
+  socket.on("race:config:set", (payload = {}, ackFn) => {
     const roomCode = socket.data.roomCode;
     const room = roomCode ? rooms.get(roomCode) : null;
     if (!room) {
@@ -3731,27 +4130,25 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const quiz = getRoomQuiz(room);
-    if (quiz.active) {
-      ack(ackFn, { ok: false, error: "quiz already active" });
+    const race = getRoomrace(room);
+    if (race.active) {
+      ack(ackFn, { ok: false, error: "race already active" });
       return;
     }
 
-    const config = ensureRoomQuizConfig(room);
-    const rawQuestions = Array.isArray(payload?.questions) ? payload.questions : null;
-    if (rawQuestions) {
-      const sanitized = sanitizeQuizQuestions(rawQuestions, {
-        fallbackToDefault: false,
-        minQuestions: 1,
-        maxQuestions: QUIZ_MAX_QUESTIONS
-      });
-      if (!Array.isArray(sanitized) || sanitized.length <= 0) {
-        ack(ackFn, { ok: false, error: "invalid question config" });
+    const config = ensureRoomraceConfig(room);
+    const requestedSeatMode = Object.prototype.hasOwnProperty.call(payload ?? {}, "seatMode")
+      ? payload?.seatMode
+      : payload?.seatAssignment?.mode;
+    if (requestedSeatMode !== undefined) {
+      const requestedMode =
+        String(requestedSeatMode ?? "").trim().toLowerCase() === "manual" ? "manual" : "auto";
+      if (requestedMode === "manual" && !TRACK_SEAT_ALLOW_MANUAL_OPTION) {
+        ack(ackFn, { ok: false, error: "manual seat mode disabled" });
         return;
       }
-      config.questions = sanitized;
+      config.seatMode = requestedMode;
     }
-
     if (payload?.endPolicy && typeof payload.endPolicy === "object") {
       config.endPolicy.autoFinish = payload.endPolicy.autoFinish !== false;
       if (Object.prototype.hasOwnProperty.call(payload.endPolicy, "showOppositeBillboard")) {
@@ -3766,16 +4163,96 @@ io.on("connection", (socket) => {
       config.endPolicy.showOppositeBillboard = payload.showOppositeBillboard !== false;
     }
     config.endPolicy.showOppositeBillboard = config.endPolicy.showOppositeBillboard !== false;
-    rememberRoomQuizConfig(room);
-    quiz.autoFinish = config.endPolicy.autoFinish;
+    rememberRoomraceConfig(room);
+    race.autoFinish = config.endPolicy.autoFinish;
 
     const response = {
       ok: true,
-      config: buildQuizConfigPayload(room)
+      config: buildraceConfigPayload(room)
     };
-    io.to(room.code).emit("quiz:config:update", response.config);
-    emitQuizScore(room, "config-update");
+    io.to(room.code).emit("race:config:update", response.config);
+    dispatchRoomSeatAssignments(room, "config-update");
+    emitraceScore(room, "config-update");
     ack(ackFn, response);
+  });
+
+  socket.on("race:seat:board", (payload = {}, ackFn) => {
+    const roomCode = socket.data.roomCode;
+    const room = roomCode ? rooms.get(roomCode) : null;
+    if (!room) {
+      ack(ackFn, { ok: false, error: "not in room" });
+      return;
+    }
+    const player = room.players.get(socket.id);
+    if (!player) {
+      ack(ackFn, { ok: false, error: "player missing" });
+      return;
+    }
+    if (player.admitted !== true || player.alive === false || isPlayerHostModerator(room, player)) {
+      ack(ackFn, { ok: false, error: "seat boarding unavailable" });
+      return;
+    }
+
+    const { sessionDraft, assignment } = resolvePlayerSeatAssignment(room, socket.id, {
+      includeWaiting: false
+    });
+    if (!sessionDraft || !assignment) {
+      ack(ackFn, { ok: false, error: "seat assignment missing" });
+      return;
+    }
+    const seatMode =
+      String(sessionDraft?.seatAssignment?.mode ?? "auto").trim().toLowerCase() === "manual"
+        ? "manual"
+        : "auto";
+    if (seatMode !== "manual") {
+      ack(ackFn, { ok: false, error: "seat mode is auto" });
+      return;
+    }
+
+    const requestedVehicleId = String(payload?.vehicleId ?? "").trim();
+    const assignedVehicleId = String(assignment?.vehicleId ?? "");
+    if (requestedVehicleId && requestedVehicleId !== assignedVehicleId) {
+      ack(ackFn, { ok: false, error: "vehicle mismatch" });
+      return;
+    }
+
+    const seatState = buildSeatStateFromAssignment(assignment);
+    const currentState = sanitizePlayerState(player.state ?? {});
+    const distance = Math.hypot(
+      Number(seatState.x) - Number(currentState.x),
+      Number(seatState.y) - Number(currentState.y),
+      Number(seatState.z) - Number(currentState.z)
+    );
+    const reachRadius = Math.max(1.6, Number(sessionDraft?.seatAssignment?.autoSeatReachRadius) || 3.2);
+    if (distance > reachRadius) {
+      ack(ackFn, {
+        ok: false,
+        error: "too far from seat",
+        distance: Number(distance.toFixed(3)),
+        required: Number(reachRadius.toFixed(3))
+      });
+      return;
+    }
+
+    setPlayerAuthoritativeState(player, seatState);
+    player.assignedVehicleId = assignedVehicleId;
+    player.seatBoarded = true;
+    socket.emit("player:correct", {
+      state: player.state,
+      reason: "race-manual-seat"
+    });
+    socket.emit("race:seat:boarded", {
+      room: String(room.code ?? ""),
+      vehicleId: assignedVehicleId,
+      seat: "driver",
+      at: Date.now()
+    });
+    ack(ackFn, {
+      ok: true,
+      vehicleId: assignedVehicleId,
+      seat: "driver",
+      state: player.state
+    });
   });
 
   socket.on("room:list", () => {
@@ -3878,7 +4355,7 @@ io.on("connection", (socket) => {
     }
 
     emitRoomUpdate(room);
-    emitQuizScore(room, "lobby-open");
+    emitraceScore(room, "lobby-open");
     ack(ackFn, opened);
   });
 
@@ -3906,7 +4383,7 @@ io.on("connection", (socket) => {
     }
 
     emitRoomUpdate(room);
-    emitQuizScore(room, "lobby-admit-countdown");
+    emitraceScore(room, "lobby-admit-countdown");
     ack(ackFn, admitted);
   });
 
@@ -4115,6 +4592,9 @@ httpServer.on("error", (error) => {
 
 httpServer.listen(PORT, () => {
   console.log(`Chat server running on http://localhost:${PORT}`);
+  console.log(
+    `[track] ${String(ACTIVE_TRACK_BLUEPRINT?.id ?? "car-race-alpha-track")} progress=${TRACK_PROGRESS_READY ? "ready" : "invalid"} checkpoints=${TRACK_CHECKPOINT_PROGRESS_VALUES.length} centerline=${TRACK_CENTERLINE_POINTS.length} colliders=${Number(TRACK_COLLIDER_LAYOUT?.segmentCount || 0)}`
+  );
   if (WORKER_SINGLE_ROOM_MODE) {
     console.log(
       `Room worker mode (${WORKER_FIXED_ROOM_CODE}, capacity ${MAX_ROOM_PLAYERS}, participant limit ${ENTRY_PARTICIPANT_LIMIT}, token ${
@@ -4127,5 +4607,7 @@ httpServer.listen(PORT, () => {
     `Match rooms enabled (${ROOM_CODE_PREFIX}-xxxxx, capacity ${MAX_ROOM_PLAYERS}, participant limit ${ENTRY_PARTICIPANT_LIMIT}, max rooms ${MAX_ACTIVE_ROOMS})`
   );
 });
+
+
 
 
