@@ -3911,6 +3911,7 @@ io.on("connection", (socket) => {
       return;
     }
 
+    const previousName = String(player.name ?? "");
     socket.data.playerName = safeName;
     player.name = safeName;
     pushRoomChatHistory(room, {
@@ -3925,7 +3926,9 @@ io.on("connection", (socket) => {
       text: safeText
     });
     ack(ackFn, { ok: true });
-    emitRoomUpdate(room);
+    if (previousName !== safeName) {
+      emitRoomUpdate(room);
+    }
   });
 
   socket.on("player:sync", (payload = {}) => {
