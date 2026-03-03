@@ -137,6 +137,7 @@ export class GameRuntime {
     this.socketEndpoint = resolveSocketEndpoint();
     this.networkConnected = false;
     this.localPlayerId = null;
+    this.currentRoomCode = "";
     this.ownerAccessEnabled = resolveOwnerAccess();
     this.remotePlayers = new Map();
     this.remoteMaterial = new THREE.MeshStandardMaterial({
@@ -320,6 +321,7 @@ export class GameRuntime {
     this.trackPropVisibility.updateInterval = 1 / Math.max(1, Number(visibilityConfig?.updateHz) || 5);
     this.trackPropVisibility.hysteresis = Math.max(0, Number(visibilityConfig?.hysteresis) || 16);
     this.trackPropVisibility.clock = 0;
+    group.updateMatrixWorld(true);
 
     group.traverse((node) => {
       if (!node?.isMesh) {
@@ -335,16 +337,19 @@ export class GameRuntime {
       if (!Number.isFinite(maxDistance) || maxDistance <= 0) {
         return;
       }
+      const centerLocal = new THREE.Vector3(
+        Number(centerRaw?.[0]) || 0,
+        Number(centerRaw?.[1]) || 0,
+        Number(centerRaw?.[2]) || 0
+      );
+      const centerWorld = centerLocal.clone().applyMatrix4(node.matrixWorld);
       this.trackPropVisibilityEntries.push({
         mesh: node,
-        centerLocal: new THREE.Vector3(
-          Number(centerRaw?.[0]) || 0,
-          Number(centerRaw?.[1]) || 0,
-          Number(centerRaw?.[2]) || 0
-        ),
-        centerWorld: new THREE.Vector3(),
+        centerWorldX: Number(centerWorld.x) || 0,
+        centerWorldY: Number(centerWorld.y) || 0,
+        centerWorldZ: Number(centerWorld.z) || 0,
         radius,
-        maxDistance
+        baseLimit: Math.max(1, maxDistance + radius)
       });
     });
   }
@@ -362,16 +367,21 @@ export class GameRuntime {
     }
 
     const hysteresis = this.trackPropVisibility.hysteresis;
+    const playerX = Number(this.playerPosition.x) || 0;
+    const playerY = Number(this.playerPosition.y) || 0;
+    const playerZ = Number(this.playerPosition.z) || 0;
     for (const entry of this.trackPropVisibilityEntries) {
       const mesh = entry?.mesh;
       if (!mesh) {
         continue;
       }
-      entry.centerWorld.copy(entry.centerLocal);
-      mesh.localToWorld(entry.centerWorld);
+      const dx = playerX - Number(entry.centerWorldX || 0);
+      const dy = playerY - Number(entry.centerWorldY || 0);
+      const dz = playerZ - Number(entry.centerWorldZ || 0);
+      const distanceSq = dx * dx + dy * dy + dz * dz;
       const extra = mesh.visible ? hysteresis : 0;
-      const limit = Math.max(1, entry.maxDistance + entry.radius + extra);
-      mesh.visible = this.playerPosition.distanceToSquared(entry.centerWorld) <= limit * limit;
+      const limit = Number(entry.baseLimit || 1) + extra;
+      mesh.visible = distanceSq <= limit * limit;
     }
   }
 
@@ -630,6 +640,7 @@ export class GameRuntime {
     this.socket.on("connect", () => {
       this.networkConnected = true;
       this.localPlayerId = this.socket?.id ?? null;
+      this.currentRoomCode = "";
       this.raceProgress = { lap: 0, progress: 0, offTrack: false, updatedAt: Date.now() };
       this.assignedSeat = null;
       this.manualBoardInFlight = false;
@@ -649,6 +660,8 @@ export class GameRuntime {
       this.assignedSeat = null;
       this.manualBoardInFlight = false;
       this.chatMuted = false;
+      this.currentRoomCode = "";
+      this.clearRemotePlayers();
       this.setSystemStatus("Disconnected");
     });
 
@@ -694,6 +707,10 @@ export class GameRuntime {
       for (const update of updates) {
         this.updateRemotePlayerFromDelta(update);
       }
+      const removals = Array.isArray(payload?.removes) ? payload.removes : [];
+      for (const removeId of removals) {
+        this.removeRemotePlayer(removeId);
+      }
     });
 
     this.socket.on("player:correct", (payload = {}) => {
@@ -702,9 +719,19 @@ export class GameRuntime {
 
     this.socket.on("room:list", (rooms = []) => {
       const list = Array.isArray(rooms) ? rooms : [];
-      const first = list[0];
-      const count = Math.max(0, Number(first?.count) || 0);
+      const preferredCode = String(this.currentRoomCode || "").trim();
+      const current = preferredCode ? list.find((entry) => String(entry?.code ?? "") === preferredCode) : list[0];
+      const count = Math.max(0, Number(current?.count) || 0);
       this.hud.setPlayers(count);
+    });
+
+    this.socket.on("room:update", (payload = {}) => {
+      const code = String(payload?.code ?? "").trim();
+      if (code) {
+        this.currentRoomCode = code;
+      }
+      const players = Array.isArray(payload?.players) ? payload.players : [];
+      this.hud.setPlayers(players.length);
     });
 
     this.socket.on("portal:target:update", (payload = {}) => {
@@ -1031,6 +1058,27 @@ export class GameRuntime {
     };
     this.remotePlayers.set(id, remote);
     return remote;
+  }
+
+  removeRemotePlayer(id) {
+    const key = String(id ?? "").trim();
+    if (!key) {
+      return;
+    }
+    const remote = this.remotePlayers.get(key);
+    if (!remote) {
+      return;
+    }
+    if (remote.mesh) {
+      this.scene.remove(remote.mesh);
+    }
+    this.remotePlayers.delete(key);
+  }
+
+  clearRemotePlayers() {
+    for (const [id] of this.remotePlayers) {
+      this.removeRemotePlayer(id);
+    }
   }
 
   onPointerDown() {

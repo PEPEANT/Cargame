@@ -175,6 +175,9 @@ const AOI_NEAR_CADENCE = cadenceFromHz(TRACK_INTEREST_CONFIG?.nearHz, 20);
 const AOI_MID_CADENCE = Math.max(AOI_NEAR_CADENCE, cadenceFromHz(TRACK_INTEREST_CONFIG?.midHz, 12));
 const AOI_FAR_CADENCE = Math.max(AOI_MID_CADENCE, cadenceFromHz(TRACK_INTEREST_CONFIG?.farHz, 10));
 const AOI_EDGE_CADENCE = Math.max(AOI_FAR_CADENCE, cadenceFromHz(TRACK_INTEREST_CONFIG?.edgeHz, 10));
+const AOI_NEAR_RADIUS_SQ = AOI_NEAR_RADIUS * AOI_NEAR_RADIUS;
+const AOI_MID_RADIUS_SQ = AOI_MID_RADIUS * AOI_MID_RADIUS;
+const AOI_FAR_RADIUS_SQ = AOI_FAR_RADIUS * AOI_FAR_RADIUS;
 
 const DELTA_POS_SCALE = 100;
 const DELTA_ROT_SCALE = 1000;
@@ -1868,16 +1871,13 @@ function clearSocketDeltaCache(socket, roomCode = null) {
 }
 
 function resolveAoiCadence(distanceSq) {
-  const nearSq = AOI_NEAR_RADIUS * AOI_NEAR_RADIUS;
-  const midSq = AOI_MID_RADIUS * AOI_MID_RADIUS;
-  const farSq = AOI_FAR_RADIUS * AOI_FAR_RADIUS;
-  if (distanceSq <= nearSq) {
+  if (distanceSq <= AOI_NEAR_RADIUS_SQ) {
     return AOI_NEAR_CADENCE;
   }
-  if (distanceSq <= midSq) {
+  if (distanceSq <= AOI_MID_RADIUS_SQ) {
     return AOI_MID_CADENCE;
   }
-  if (distanceSq <= farSq) {
+  if (distanceSq <= AOI_FAR_RADIUS_SQ) {
     return AOI_FAR_CADENCE;
   }
   return AOI_EDGE_CADENCE;
@@ -1905,7 +1905,7 @@ function emitRoomDeltaSnapshot(room) {
   room.tick = Number(room.tick || 0) + 1;
   const players = Array.from(room.players.values());
   const activePlayerIds = new Set();
-  const playerStates = new Map();
+  const playerKinematics = new Map();
   const packedStates = new Map();
 
   for (const player of players) {
@@ -1913,8 +1913,14 @@ function emitRoomDeltaSnapshot(room) {
       continue;
     }
     const state = player.state ?? sanitizePlayerState();
+    const px = Number(state?.x) || 0;
+    const pz = Number(state?.z) || 0;
     activePlayerIds.add(player.id);
-    playerStates.set(player.id, state);
+    playerKinematics.set(player.id, {
+      state,
+      x: px,
+      z: pz
+    });
     packedStates.set(player.id, buildPackedRemoteState(player, state));
   }
 
@@ -1931,16 +1937,20 @@ function emitRoomDeltaSnapshot(room) {
 
     const updates = [];
     const removals = [];
-    const receiverState = playerStates.get(receiver.id) ?? sanitizePlayerState();
+    const receiverKinematics = playerKinematics.get(receiver.id);
+    const receiverX = Number(receiverKinematics?.x) || 0;
+    const receiverZ = Number(receiverKinematics?.z) || 0;
 
     for (const remote of players) {
       if (!remote || remote.id === receiver.id) {
         continue;
       }
 
-      const remoteState = playerStates.get(remote.id) ?? sanitizePlayerState();
-      const dx = Number(remoteState.x) - Number(receiverState.x);
-      const dz = Number(remoteState.z) - Number(receiverState.z);
+      const remoteKinematics = playerKinematics.get(remote.id);
+      const remoteX = Number(remoteKinematics?.x) || 0;
+      const remoteZ = Number(remoteKinematics?.z) || 0;
+      const dx = remoteX - receiverX;
+      const dz = remoteZ - receiverZ;
       const distanceSq = dx * dx + dz * dz;
       const cadence = resolveAoiCadence(distanceSq);
 
@@ -1951,7 +1961,8 @@ function emitRoomDeltaSnapshot(room) {
         continue;
       }
 
-      const packed = packedStates.get(remote.id) ?? buildPackedRemoteState(remote, remoteState);
+      const packed =
+        packedStates.get(remote.id) ?? buildPackedRemoteState(remote, remoteKinematics?.state ?? sanitizePlayerState());
       const changed =
         !cached ||
         cached.px !== packed.px ||
