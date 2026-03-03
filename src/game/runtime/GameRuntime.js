@@ -58,7 +58,8 @@ function createRemoteMesh(material) {
   const group = new THREE.Group();
 
   const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.82, 6, 10), material);
-  body.position.y = 1.08;
+  // Remote avatar origin is aligned to feet on ground.
+  body.position.y = 0.76;
   body.castShadow = true;
   body.receiveShadow = true;
 
@@ -66,7 +67,7 @@ function createRemoteMesh(material) {
     new THREE.SphereGeometry(0.25, 16, 12),
     new THREE.MeshStandardMaterial({ color: 0xd4b59b, roughness: 0.7, metalness: 0 })
   );
-  head.position.y = 1.92;
+  head.position.y = 1.6;
   head.castShadow = true;
   head.receiveShadow = true;
 
@@ -185,6 +186,18 @@ export class GameRuntime {
     this.portalTargetSaveBtnEl = document.getElementById("portal-target-save-btn");
     this.raceControlsEl = document.getElementById("race-controls");
     this.raceControlsNoteEl = document.getElementById("race-controls-note");
+    this.chatUiEl = document.getElementById("chat-ui");
+    this.chatLogEl = document.getElementById("chat-log");
+    this.chatControlsEl = document.getElementById("chat-controls");
+    this.chatInputEl = document.getElementById("chat-input");
+    this.chatSendBtnEl = document.getElementById("chat-send-btn");
+    this.chatHideBtnEl = document.getElementById("chat-hide-btn");
+    this.chatCloseBtnEl = document.getElementById("chat-close-btn");
+    this.mobileChatToggleBtnEl = document.getElementById("mobile-chat-toggle-btn");
+    this.chatMuted = false;
+    this.chatUnreadCount = 0;
+    this.chatMaxEntries = 80;
+    this.chatOpen = !this.mobileEnabled;
 
     this.boundLoop = this.loop.bind(this);
     this.boundResize = this.onResize.bind(this);
@@ -203,6 +216,7 @@ export class GameRuntime {
     this.setupPortalMarker();
     this.bindDomEvents();
     this.bindRaceControls();
+    this.bindChatUi();
     this.connectSocket();
     this.updateRaceControlsVisibility();
     this.hud.setStatus("Booting race runtime");
@@ -465,6 +479,145 @@ export class GameRuntime {
     }
   }
 
+  bindChatUi() {
+    if (!this.chatUiEl || !this.chatLogEl) {
+      return;
+    }
+    this.chatControlsEl?.classList.remove("hidden");
+    this.chatUiEl.classList.toggle("mobile-chat-hidden", this.mobileEnabled && !this.chatOpen);
+    this.updateMobileChatToggleState();
+
+    this.chatSendBtnEl?.addEventListener("click", () => {
+      this.sendChatMessage();
+    });
+    this.chatInputEl?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        this.sendChatMessage();
+      }
+      event.stopPropagation();
+    });
+    this.chatInputEl?.addEventListener("focus", () => {
+      if (this.mobileEnabled) {
+        document.body.classList.add("mobile-chat-focus");
+      }
+    });
+    this.chatInputEl?.addEventListener("blur", () => {
+      if (this.mobileEnabled) {
+        document.body.classList.remove("mobile-chat-focus");
+      }
+    });
+    this.chatHideBtnEl?.addEventListener("click", () => {
+      if (this.mobileEnabled) {
+        this.chatOpen = false;
+        this.chatUiEl?.classList.add("mobile-chat-hidden");
+        document.body.classList.remove("mobile-chat-focus");
+        this.updateMobileChatToggleState();
+      }
+    });
+    this.chatCloseBtnEl?.addEventListener("click", () => {
+      if (!this.mobileEnabled) {
+        this.chatInputEl?.focus();
+        return;
+      }
+      this.chatOpen = !this.chatOpen;
+      this.chatUiEl?.classList.toggle("mobile-chat-hidden", !this.chatOpen);
+      if (!this.chatOpen) {
+        document.body.classList.remove("mobile-chat-focus");
+      }
+      if (this.chatOpen) {
+        this.chatUnreadCount = 0;
+      }
+      this.updateMobileChatToggleState();
+    });
+    this.mobileChatToggleBtnEl?.addEventListener("click", () => {
+      this.chatOpen = !this.chatOpen;
+      this.chatUiEl?.classList.toggle("mobile-chat-hidden", !this.chatOpen);
+      if (this.chatOpen) {
+        this.chatUnreadCount = 0;
+        this.chatInputEl?.focus();
+      } else {
+        document.body.classList.remove("mobile-chat-focus");
+      }
+      this.updateMobileChatToggleState();
+    });
+  }
+
+  updateMobileChatToggleState() {
+    if (!this.mobileChatToggleBtnEl) {
+      return;
+    }
+    this.mobileChatToggleBtnEl.classList.toggle("hidden", !this.mobileEnabled);
+    this.mobileChatToggleBtnEl.classList.toggle("active", this.chatOpen);
+    if (this.chatUnreadCount > 0) {
+      this.mobileChatToggleBtnEl.dataset.unread = String(Math.min(99, this.chatUnreadCount));
+    } else {
+      delete this.mobileChatToggleBtnEl.dataset.unread;
+    }
+  }
+
+  appendChatLine(payload = {}, { system = false } = {}) {
+    if (!this.chatLogEl) {
+      return;
+    }
+    const text = String(payload?.text ?? "").trim();
+    if (!text) {
+      return;
+    }
+    const line = document.createElement("p");
+    line.className = `chat-line${system ? " system" : ""}${
+      String(payload?.id ?? "") === String(this.localPlayerId ?? "") ? " self" : ""
+    }`;
+    if (!system) {
+      const name = document.createElement("span");
+      name.className = "chat-name";
+      name.textContent = `${String(payload?.name ?? "PLAYER")}:`;
+      line.appendChild(name);
+    }
+    line.appendChild(document.createTextNode(text));
+    this.chatLogEl.appendChild(line);
+    while (this.chatLogEl.childElementCount > this.chatMaxEntries) {
+      this.chatLogEl.removeChild(this.chatLogEl.firstElementChild);
+    }
+    this.chatLogEl.scrollTop = this.chatLogEl.scrollHeight;
+
+    if (this.mobileEnabled && !this.chatOpen && !system) {
+      this.chatUnreadCount += 1;
+      this.updateMobileChatToggleState();
+    }
+  }
+
+  renderChatHistory(payload = {}) {
+    if (!this.chatLogEl) {
+      return;
+    }
+    this.chatLogEl.textContent = "";
+    const history = Array.isArray(payload?.entries) ? payload.entries : [];
+    for (const entry of history) {
+      this.appendChatLine(entry, { system: String(entry?.type ?? "") === "system" });
+    }
+  }
+
+  sendChatMessage() {
+    if (!this.socket || !this.networkConnected || this.chatMuted) {
+      return;
+    }
+    const text = String(this.chatInputEl?.value ?? "").trim();
+    if (!text) {
+      return;
+    }
+    this.socket.emit("chat:send", { text }, (response = {}) => {
+      if (!response?.ok) {
+        const reason = String(response?.error ?? "send failed");
+        this.appendChatLine({ text: `채팅 전송 실패: ${reason}` }, { system: true });
+        return;
+      }
+      if (this.chatInputEl) {
+        this.chatInputEl.value = "";
+      }
+    });
+  }
+
   connectSocket() {
     this.socket = io(this.socketEndpoint, {
       transports: ["websocket"],
@@ -480,6 +633,7 @@ export class GameRuntime {
       this.raceProgress = { lap: 0, progress: 0, offTrack: false, updatedAt: Date.now() };
       this.assignedSeat = null;
       this.manualBoardInFlight = false;
+      this.chatMuted = false;
       this.setSystemStatus(`Connected to ${this.socketEndpoint}`);
       this.socket.emit("room:list");
     });
@@ -489,6 +643,7 @@ export class GameRuntime {
       this.raceProgress = { lap: 0, progress: 0, offTrack: false, updatedAt: Date.now() };
       this.assignedSeat = null;
       this.manualBoardInFlight = false;
+      this.chatMuted = false;
       this.setSystemStatus("Disconnected");
     });
 
@@ -552,6 +707,26 @@ export class GameRuntime {
       if (this.portalTargetInputEl && this.portalTargetInputEl.value !== next) {
         this.portalTargetInputEl.value = next;
       }
+    });
+
+    this.socket.on("chat:history", (payload = {}) => {
+      this.renderChatHistory(payload);
+    });
+    this.socket.on("chat:message", (payload = {}) => {
+      this.appendChatLine(payload);
+    });
+    this.socket.on("host:chat-muted", (payload = {}) => {
+      this.chatMuted = payload?.muted === true;
+      if (this.chatInputEl) {
+        this.chatInputEl.disabled = this.chatMuted;
+      }
+      if (this.chatSendBtnEl) {
+        this.chatSendBtnEl.disabled = this.chatMuted;
+      }
+      this.appendChatLine(
+        { text: this.chatMuted ? "채팅이 제한되었습니다." : "채팅 제한이 해제되었습니다." },
+        { system: true }
+      );
     });
   }
 
@@ -760,7 +935,7 @@ export class GameRuntime {
     }
     const yaw = Number(state?.yaw) || 0;
     const remote = this.ensureRemotePlayer(id);
-    this.setRemoteTarget(remote, x, y, z, yaw);
+    this.setRemoteTarget(remote, x, y - GAME_CONSTANTS.PLAYER_HEIGHT, z, yaw);
   }
 
   updateRemotePlayerFromDelta(update) {
@@ -775,7 +950,8 @@ export class GameRuntime {
     const r = Array.isArray(update?.r) ? update.r : null;
     const remote = this.ensureRemotePlayer(id);
     const x = (Number(p[0]) || 0) / DELTA_POS_SCALE;
-    const y = (Number(p[1]) || GAME_CONSTANTS.PLAYER_HEIGHT * DELTA_POS_SCALE) / DELTA_POS_SCALE;
+    const y =
+      (Number(p[1]) || GAME_CONSTANTS.PLAYER_HEIGHT * DELTA_POS_SCALE) / DELTA_POS_SCALE - GAME_CONSTANTS.PLAYER_HEIGHT;
     const z = (Number(p[2]) || 0) / DELTA_POS_SCALE;
     const yaw =
       r && r.length >= 1 ? (Number(r[0]) || 0) / DELTA_ROT_SCALE : Number(update?.y) || remote.targetYaw || 0;
@@ -843,7 +1019,7 @@ export class GameRuntime {
     const remote = {
       id,
       mesh,
-      targetPosition: new THREE.Vector3(0, GAME_CONSTANTS.PLAYER_HEIGHT, 0),
+      targetPosition: new THREE.Vector3(0, 0, 0),
       velocity: new THREE.Vector3(0, 0, 0),
       targetYaw: 0,
       lastUpdateAt: performance.now()
@@ -878,6 +1054,27 @@ export class GameRuntime {
 
   onKeyDown(event) {
     const code = String(event?.code ?? "");
+    const activeEl = document.activeElement;
+    const typingInField =
+      activeEl &&
+      (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.isContentEditable === true);
+    if (typingInField) {
+      if (code === "Escape" && this.chatInputEl === activeEl) {
+        this.chatInputEl.blur();
+      }
+      return;
+    }
+    if (code === "Enter" && this.chatInputEl) {
+      event.preventDefault();
+      if (this.mobileEnabled && !this.chatOpen) {
+        this.chatOpen = true;
+        this.chatUiEl?.classList.remove("mobile-chat-hidden");
+        this.chatUnreadCount = 0;
+        this.updateMobileChatToggleState();
+      }
+      this.chatInputEl.focus();
+      return;
+    }
     this.keys.add(code);
     if (code === "KeyF") {
       this.tryManualBoardAssignedSeat();

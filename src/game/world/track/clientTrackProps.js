@@ -182,7 +182,8 @@ function buildInstancedPrefabMesh(source, curve, entry, visibility) {
   mesh.name = `race-track-prop-${String(entry?.key || "unknown")}`;
   mesh.castShadow = false;
   mesh.receiveShadow = true;
-  mesh.frustumCulled = true;
+  // Instanced mesh bounds can be under-estimated across wide tracks; avoid pop/disappear.
+  mesh.frustumCulled = false;
 
   const start = clamp01(entry?.start);
   const end = clamp01(entry?.end);

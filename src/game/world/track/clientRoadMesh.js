@@ -6,16 +6,6 @@ function toVector3(raw) {
   return new THREE.Vector3(Number(point[0]) || 0, Number(point[1]) || 0, Number(point[2]) || 0);
 }
 
-function createRoadShape(halfWidth, thickness) {
-  const shape = new THREE.Shape();
-  shape.moveTo(-halfWidth, 0);
-  shape.lineTo(halfWidth, 0);
-  shape.lineTo(halfWidth, thickness);
-  shape.lineTo(-halfWidth, thickness);
-  shape.closePath();
-  return shape;
-}
-
 function buildCurve(points) {
   const vectors = points.map((point) => toVector3(point));
   return new THREE.CatmullRomCurve3(vectors, true, "catmullrom", 0.25);
@@ -35,21 +25,87 @@ function buildCurveSlice(curve, startProgress, endProgress, sampleCount = 60) {
 
 function buildExtrudedRoadMesh(curve, options = {}) {
   const halfWidth = Math.max(2, Number(options.halfWidth) || 7.6);
-  const thickness = Math.max(0.08, Number(options.thickness) || 0.34);
+  const thickness = Math.max(0.02, Number(options.thickness) || 0.34);
   const steps = Math.max(120, Math.trunc(Number(options.steps) || 460));
   const material =
     options.material ||
     new THREE.MeshStandardMaterial({
       color: 0x34393e,
       roughness: 0.92,
-      metalness: 0.08
+      metalness: 0.08,
+      side: THREE.DoubleSide
     });
+  const sampleCount = Math.max(64, steps);
+  const positionArray = new Float32Array((sampleCount + 1) * 2 * 3);
+  const normalArray = new Float32Array((sampleCount + 1) * 2 * 3);
+  const uvArray = new Float32Array((sampleCount + 1) * 2 * 2);
+  const indexArray = new Uint32Array(sampleCount * 6);
 
-  const geometry = new THREE.ExtrudeGeometry(createRoadShape(halfWidth, thickness), {
-    steps,
-    bevelEnabled: false,
-    extrudePath: curve
-  });
+  const point = new THREE.Vector3();
+  const tangent = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+  const left = new THREE.Vector3();
+  const right = new THREE.Vector3();
+
+  for (let i = 0; i <= sampleCount; i += 1) {
+    const t = i / sampleCount;
+    curve.getPointAt(t, point);
+    curve.getTangentAt(t, tangent);
+    tangent.y = 0;
+    if (tangent.lengthSq() < 1e-9) {
+      tangent.set(0, 0, 1);
+    } else {
+      tangent.normalize();
+    }
+    normal.set(tangent.z, 0, -tangent.x).normalize();
+    left.copy(point).addScaledVector(normal, halfWidth);
+    right.copy(point).addScaledVector(normal, -halfWidth);
+    left.y += thickness;
+    right.y += thickness;
+
+    const vBase = i * 2;
+    const pOffset = vBase * 3;
+    positionArray[pOffset] = left.x;
+    positionArray[pOffset + 1] = left.y;
+    positionArray[pOffset + 2] = left.z;
+    positionArray[pOffset + 3] = right.x;
+    positionArray[pOffset + 4] = right.y;
+    positionArray[pOffset + 5] = right.z;
+
+    normalArray[pOffset] = 0;
+    normalArray[pOffset + 1] = 1;
+    normalArray[pOffset + 2] = 0;
+    normalArray[pOffset + 3] = 0;
+    normalArray[pOffset + 4] = 1;
+    normalArray[pOffset + 5] = 0;
+
+    const uvOffset = vBase * 2;
+    uvArray[uvOffset] = 0;
+    uvArray[uvOffset + 1] = t;
+    uvArray[uvOffset + 2] = 1;
+    uvArray[uvOffset + 3] = t;
+  }
+
+  for (let i = 0; i < sampleCount; i += 1) {
+    const v = i * 2;
+    const next = (i + 1) * 2;
+    const indexOffset = i * 6;
+    indexArray[indexOffset] = v;
+    indexArray[indexOffset + 1] = next;
+    indexArray[indexOffset + 2] = v + 1;
+    indexArray[indexOffset + 3] = v + 1;
+    indexArray[indexOffset + 4] = next;
+    indexArray[indexOffset + 5] = next + 1;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positionArray, 3));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normalArray, 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(uvArray, 2));
+  geometry.setIndex(new THREE.BufferAttribute(indexArray, 1));
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+
   const mesh = new THREE.Mesh(geometry, material);
   mesh.receiveShadow = true;
   mesh.castShadow = false;
