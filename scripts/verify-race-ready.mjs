@@ -50,7 +50,9 @@ async function main() {
     { key: "audit:ox:strict", title: "OX strict audit" },
     { key: "verify:map-assets", title: "OSS license/credits audit" },
     { key: "verify:race-allocation", title: "N:N race allocation" },
-    { key: "check:smoke", title: "socket smoke check" }
+    { key: "check:smoke", title: "socket smoke check" },
+    { key: "check:gateway", title: "gateway redirect/health check" },
+    { key: "check:scaleout", title: "multi-gateway routing check" }
   ];
 
   if (includeBuild) {
