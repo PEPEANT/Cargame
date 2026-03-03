@@ -1,7 +1,11 @@
 ﻿import { createServer } from "http";
 import { Server } from "socket.io";
 import { verifyRoomJoinToken } from "./src/server/roomToken.js";
-import { createRaceSessionDraft } from "./src/game/modes/race/RaceSessionDefaults.js";
+import {
+  createRaceSessionDraft,
+  RACE_SEAT_DEFAULTS,
+  RACE_SESSION_DEFAULTS
+} from "./src/game/modes/race/RaceSessionDefaults.js";
 import {
   CAR_RACE_TRACK_BLUEPRINT,
   getCenterlinePoints,
@@ -235,7 +239,7 @@ const TRACK_SPAWN_HUB = ACTIVE_TRACK_BLUEPRINT?.spawnHub ?? {};
 const TRACK_SEAT_RULES = ACTIVE_TRACK_BLUEPRINT?.raceRules?.seatAssignment ?? {};
 const TRACK_SEAT_ALLOW_MANUAL_OPTION = TRACK_SEAT_RULES?.allowManualOption !== false;
 const TRACK_SEAT_DEFAULT_MODE =
-  String(TRACK_SEAT_RULES?.modeDefault ?? "auto").trim().toLowerCase() === "manual" &&
+  String(TRACK_SEAT_RULES?.modeDefault ?? RACE_SESSION_DEFAULTS.seatModeDefault).trim().toLowerCase() === "manual" &&
   TRACK_SEAT_ALLOW_MANUAL_OPTION
     ? "manual"
     : "auto";
@@ -2308,7 +2312,10 @@ function emitSeatAssignmentToPlayer(socket, room, assignment, sessionDraft, extr
     allowManualOption: seatAssignment?.allowManualOption !== false,
     autoSeatOnSpawn: seatAssignment?.autoSeatOnSpawn !== false,
     autoSeatDelaySeconds: Math.max(0, Number(seatAssignment?.autoSeatDelaySeconds) || 0),
-    autoSeatReachRadius: Math.max(1.6, Number(seatAssignment?.autoSeatReachRadius) || 3.2),
+    autoSeatReachRadius: Math.max(
+      1.6,
+      Number(seatAssignment?.autoSeatReachRadius) || RACE_SEAT_DEFAULTS.autoSeatReachRadius
+    ),
     autoSeatAt,
     autoApplied: extras?.autoApplied === true,
     assignment: {
@@ -2386,7 +2393,10 @@ function maybeAutoSeatPlayerOnReach(room, player, sourceSocket = null) {
     Number(seatState.y) - Number(currentState.y),
     Number(seatState.z) - Number(currentState.z)
   );
-  const reachRadius = Math.max(1.6, Number(seatAssignment?.autoSeatReachRadius) || 3.2);
+  const reachRadius = Math.max(
+    1.6,
+    Number(seatAssignment?.autoSeatReachRadius) || RACE_SEAT_DEFAULTS.autoSeatReachRadius
+  );
   if (distance > reachRadius) {
     return false;
   }
@@ -4295,7 +4305,10 @@ io.on("connection", (socket) => {
       Number(seatState.y) - Number(currentState.y),
       Number(seatState.z) - Number(currentState.z)
     );
-    const reachRadius = Math.max(1.6, Number(sessionDraft?.seatAssignment?.autoSeatReachRadius) || 3.2);
+    const reachRadius = Math.max(
+      1.6,
+      Number(sessionDraft?.seatAssignment?.autoSeatReachRadius) || RACE_SEAT_DEFAULTS.autoSeatReachRadius
+    );
     if (distance > reachRadius) {
       ack(ackFn, {
         ok: false,

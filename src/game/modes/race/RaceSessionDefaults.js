@@ -10,6 +10,13 @@ export const RACE_SESSION_DEFAULTS = Object.freeze({
   seatModeDefault: "auto"
 });
 
+export const RACE_SEAT_DEFAULTS = Object.freeze({
+  modeDefault: RACE_SESSION_DEFAULTS.seatModeDefault,
+  autoSeatDelaySeconds: 4,
+  autoSeatOnReachVehicle: true,
+  autoSeatReachRadius: 3.2
+});
+
 function normalizeSeatMode(rawMode, fallback = RACE_SESSION_DEFAULTS.seatModeDefault) {
   const value = String(rawMode ?? fallback)
     .trim()
@@ -43,14 +50,15 @@ export function createRaceSessionDraft(payload = {}) {
   const seededParticipants = participantIds.slice(0, count);
   const seatAssignments = createVehicleSeatAssignments(seededParticipants, parkedCars, { strict: false });
   const seatRules = track?.raceRules?.seatAssignment ?? track?.seatAssignment ?? {};
-  const seatMode = normalizeSeatMode(payload.seatMode ?? seatRules.modeDefault);
+  const seatMode = normalizeSeatMode(payload.seatMode ?? seatRules.modeDefault ?? RACE_SEAT_DEFAULTS.modeDefault);
   const autoSeatOnSpawn = seatMode !== "manual";
   const autoSeatDelaySeconds = Math.max(
     0,
-    Math.min(12, Number(seatRules.autoSeatDelaySeconds) || 4)
+    Math.min(12, Number(seatRules.autoSeatDelaySeconds) || RACE_SEAT_DEFAULTS.autoSeatDelaySeconds)
   );
-  const autoSeatOnReachVehicle = seatRules.autoSeatOnReachVehicle !== false;
-  const autoSeatReachRadius = Math.max(1.6, Number(seatRules.autoSeatReachRadius) || 3.2);
+  const autoSeatOnReachVehicle =
+    seatRules.autoSeatOnReachVehicle !== false && RACE_SEAT_DEFAULTS.autoSeatOnReachVehicle !== false;
+  const autoSeatReachRadius = Math.max(1.6, Number(seatRules.autoSeatReachRadius) || RACE_SEAT_DEFAULTS.autoSeatReachRadius);
   const spawnHub = track?.spawnHub ?? {};
   const startGridPlatform = spawnHub?.startGridPlatform ?? {};
 

@@ -3,6 +3,7 @@ import { io } from "socket.io-client";
 import { HUD } from "../ui/HUD.js";
 import { GAME_CONSTANTS } from "../config/gameConstants.js";
 import { getContentPack } from "../content/registry.js";
+import { RACE_SEAT_DEFAULTS, RACE_SESSION_DEFAULTS } from "../modes/race/RaceSessionDefaults.js";
 import { isLikelyTouchDevice } from "../utils/device.js";
 import { buildRoadMeshesFromCenterline } from "../world/track/clientRoadMesh.js";
 import { buildTrackPropInstancesFromPack } from "../world/track/clientTrackProps.js";
@@ -163,11 +164,11 @@ export class GameRuntime {
       updatedAt: 0
     };
     this.raceSessionConfig = {
-      seatMode: "auto",
+      seatMode: RACE_SESSION_DEFAULTS.seatModeDefault,
       allowManualOption: true,
-      autoSeatDelaySeconds: 4,
-      autoSeatOnReachVehicle: true,
-      autoSeatReachRadius: 3.2
+      autoSeatDelaySeconds: RACE_SEAT_DEFAULTS.autoSeatDelaySeconds,
+      autoSeatOnReachVehicle: RACE_SEAT_DEFAULTS.autoSeatOnReachVehicle,
+      autoSeatReachRadius: RACE_SEAT_DEFAULTS.autoSeatReachRadius
     };
     this.assignedSeat = null;
     this.lastManualBoardAttemptAt = 0;
@@ -1001,7 +1002,10 @@ export class GameRuntime {
     const sessionDraft = payload?.sessionDraft ?? null;
     const seatAssignment = sessionDraft?.seatAssignment ?? {};
     const nextSeatMode = String(
-      seatAssignment?.mode ?? seatAssignment?.defaultMode ?? this.raceSessionConfig.seatMode ?? "auto"
+      seatAssignment?.mode ??
+        seatAssignment?.defaultMode ??
+        this.raceSessionConfig.seatMode ??
+        RACE_SESSION_DEFAULTS.seatModeDefault
     )
       .trim()
       .toLowerCase() === "manual"
@@ -1011,9 +1015,15 @@ export class GameRuntime {
     this.raceSessionConfig = {
       seatMode: nextSeatMode,
       allowManualOption: seatAssignment?.allowManualOption !== false,
-      autoSeatDelaySeconds: Math.max(0, Number(seatAssignment?.autoSeatDelaySeconds) || 4),
+      autoSeatDelaySeconds: Math.max(
+        0,
+        Number(seatAssignment?.autoSeatDelaySeconds) || RACE_SEAT_DEFAULTS.autoSeatDelaySeconds
+      ),
       autoSeatOnReachVehicle: seatAssignment?.autoSeatOnReachVehicle !== false,
-      autoSeatReachRadius: Math.max(1.6, Number(seatAssignment?.autoSeatReachRadius) || 3.2)
+      autoSeatReachRadius: Math.max(
+        1.6,
+        Number(seatAssignment?.autoSeatReachRadius) || RACE_SEAT_DEFAULTS.autoSeatReachRadius
+      )
     };
     this.syncLocalSeatAssignmentFromSessionDraft(sessionDraft);
     if (previousSeatMode !== nextSeatMode) {
@@ -1066,7 +1076,7 @@ export class GameRuntime {
     if (!seatPosition) {
       return;
     }
-    const mode = String(payload?.mode ?? this.raceSessionConfig.seatMode ?? "auto")
+    const mode = String(payload?.mode ?? this.raceSessionConfig.seatMode ?? RACE_SESSION_DEFAULTS.seatModeDefault)
       .trim()
       .toLowerCase() === "manual"
       ? "manual"
@@ -1084,7 +1094,9 @@ export class GameRuntime {
     };
     this.raceSessionConfig.autoSeatReachRadius = Math.max(
       1.6,
-      Number(payload?.autoSeatReachRadius) || Number(this.raceSessionConfig?.autoSeatReachRadius) || 3.2
+      Number(payload?.autoSeatReachRadius) ||
+        Number(this.raceSessionConfig?.autoSeatReachRadius) ||
+        RACE_SEAT_DEFAULTS.autoSeatReachRadius
     );
 
     if (payload?.autoApplied === true) {
@@ -1148,7 +1160,13 @@ export class GameRuntime {
     const dy = Number(seatPos.y) - this.playerPosition.y;
     const dz = Number(seatPos.z) - this.playerPosition.z;
     const distance = Math.hypot(dx, dy, dz);
-    if (distance > Math.max(1.6, Number(this.raceSessionConfig?.autoSeatReachRadius) || 3.2)) {
+    if (
+      distance >
+      Math.max(
+        1.6,
+        Number(this.raceSessionConfig?.autoSeatReachRadius) || RACE_SEAT_DEFAULTS.autoSeatReachRadius
+      )
+    ) {
       this.setSystemStatus("Move closer to your assigned car seat");
       return false;
     }
