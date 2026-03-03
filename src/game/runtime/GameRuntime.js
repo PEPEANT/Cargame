@@ -1229,17 +1229,33 @@ export class GameRuntime {
       return;
     }
     const p = Array.isArray(update?.p) ? update.p : null;
-    if (!p || p.length < 3) {
+    const r = Array.isArray(update?.r) ? update.r : null;
+    const hasPosition = Boolean(p && p.length >= 3);
+    const hasRotation = Boolean(r && r.length >= 1);
+    const remote = this.ensureRemotePlayer(id);
+
+    const alive = Number(update?.a);
+    if (alive === 0 || alive === 1) {
+      remote.alive = alive === 1;
+      remote.mesh.visible = remote.alive;
+    }
+
+    if (!hasPosition && !hasRotation) {
       return;
     }
-    const r = Array.isArray(update?.r) ? update.r : null;
-    const remote = this.ensureRemotePlayer(id);
-    const x = (Number(p[0]) || 0) / DELTA_POS_SCALE;
-    const y =
-      (Number(p[1]) || GAME_CONSTANTS.PLAYER_HEIGHT * DELTA_POS_SCALE) / DELTA_POS_SCALE - GAME_CONSTANTS.PLAYER_HEIGHT;
-    const z = (Number(p[2]) || 0) / DELTA_POS_SCALE;
-    const yaw =
-      r && r.length >= 1 ? (Number(r[0]) || 0) / DELTA_ROT_SCALE : Number(update?.y) || remote.targetYaw || 0;
+
+    const pxRaw = hasPosition ? Number(p[0]) : NaN;
+    const pyRaw = hasPosition ? Number(p[1]) : NaN;
+    const pzRaw = hasPosition ? Number(p[2]) : NaN;
+
+    const x = Number.isFinite(pxRaw) ? pxRaw / DELTA_POS_SCALE : remote.targetPosition.x;
+    const y = Number.isFinite(pyRaw)
+      ? pyRaw / DELTA_POS_SCALE - GAME_CONSTANTS.PLAYER_HEIGHT
+      : remote.targetPosition.y;
+    const z = Number.isFinite(pzRaw) ? pzRaw / DELTA_POS_SCALE : remote.targetPosition.z;
+
+    const yawRaw = hasRotation ? Number(r[0]) : NaN;
+    const yaw = Number.isFinite(yawRaw) ? yawRaw / DELTA_ROT_SCALE : remote.targetYaw || 0;
     this.setRemoteTarget(remote, x, y, z, yaw);
   }
 
@@ -1311,6 +1327,7 @@ export class GameRuntime {
     const remote = {
       id,
       mesh,
+      alive: true,
       targetPosition: new THREE.Vector3(0, 0, 0),
       velocity: new THREE.Vector3(0, 0, 0),
       targetYaw: 0,

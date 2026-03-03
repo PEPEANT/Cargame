@@ -2056,7 +2056,7 @@ function emitRoomDeltaSnapshot(room) {
       });
     }
 
-    for (const cachedId of Array.from(cache.keys())) {
+    for (const [cachedId] of cache) {
       if (!activePlayerIds.has(cachedId) || !candidateIds.has(cachedId)) {
         cache.delete(cachedId);
         removals.push(cachedId);

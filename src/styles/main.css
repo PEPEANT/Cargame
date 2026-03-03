@@ -289,7 +289,7 @@ body.mobile-orientation-lock #hub-flow-ui {
 }
 
 .roster-entry.host .roster-name::before {
-  content: "諛⑹옣 ";
+  content: "방장 ";
   color: #9ad2ff;
   font-weight: 800;
 }
