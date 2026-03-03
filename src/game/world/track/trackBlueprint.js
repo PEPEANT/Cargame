@@ -257,7 +257,9 @@ export const CAR_RACE_TRACK_BLUEPRINT = Object.freeze({
   performance: {
     roadSteps: 220,
     startWideSteps: 120,
-    guardrailPostCount: 180
+    guardrailPostCount: 180,
+    lampPostCount: 56,
+    signCount: 24
   },
   networkInterest: {
     sectorCount: 12,

@@ -23,6 +23,26 @@ function buildCurveSlice(curve, startProgress, endProgress, sampleCount = 60) {
   return new THREE.CatmullRomCurve3(points, false, "catmullrom", 0.25);
 }
 
+function sampleCurveFrame(curve, progress, frame = {}) {
+  const point = frame.point || new THREE.Vector3();
+  const tangent = frame.tangent || new THREE.Vector3();
+  const normal = frame.normal || new THREE.Vector3();
+  const t = Math.max(0, Math.min(1, Number(progress) || 0));
+  curve.getPointAt(t, point);
+  curve.getTangentAt(t, tangent);
+  tangent.y = 0;
+  if (tangent.lengthSq() < 1e-9) {
+    tangent.set(0, 0, 1);
+  } else {
+    tangent.normalize();
+  }
+  normal.set(tangent.z, 0, -tangent.x).normalize();
+  frame.point = point;
+  frame.tangent = tangent;
+  frame.normal = normal;
+  return frame;
+}
+
 function buildExtrudedRoadMesh(curve, options = {}) {
   const halfWidth = Math.max(2, Number(options.halfWidth) || 7.6);
   const thickness = Math.max(0.02, Number(options.thickness) || 0.34);
@@ -135,30 +155,20 @@ function buildGuardrailPostInstances(curve, options = {}) {
   mesh.castShadow = false;
   mesh.receiveShadow = true;
 
-  const point = new THREE.Vector3();
-  const tangent = new THREE.Vector3();
-  const normal = new THREE.Vector3();
+  const frame = {};
   const matrix = new THREE.Matrix4();
   const rotation = new THREE.Quaternion();
   const scale = new THREE.Vector3(1, 1, 1);
   let writeIndex = 0;
   for (let index = 0; index < postCount; index += 1) {
     const progress = index / postCount;
-    curve.getPointAt(progress, point);
-    curve.getTangentAt(progress, tangent);
-    tangent.y = 0;
-    if (tangent.lengthSq() < 1e-9) {
-      tangent.set(0, 0, 1);
-    } else {
-      tangent.normalize();
-    }
-    normal.set(tangent.z, 0, -tangent.x).normalize();
+    sampleCurveFrame(curve, progress, frame);
     for (const side of [-1, 1]) {
       matrix.compose(
         new THREE.Vector3(
-          point.x + normal.x * lateralOffset * side,
-          point.y + postHeight * 0.5,
-          point.z + normal.z * lateralOffset * side
+          frame.point.x + frame.normal.x * lateralOffset * side,
+          frame.point.y + postHeight * 0.5,
+          frame.point.z + frame.normal.z * lateralOffset * side
         ),
         rotation,
         scale
@@ -169,6 +179,178 @@ function buildGuardrailPostInstances(curve, options = {}) {
   }
   mesh.instanceMatrix.needsUpdate = true;
   return mesh;
+}
+
+function buildLampPostInstances(curve, options = {}) {
+  const lampCount = Math.max(12, Math.trunc(Number(options.lampCount) || 56));
+  const halfWidth = Math.max(2, Number(options.halfWidth) || 7.6);
+  const shoulderWidth = Math.max(0.4, Number(options.shoulderWidth) || 1.1);
+  const offset = Math.max(1.4, Number(options.lampOffset) || 6.1);
+  const lateralOffset = halfWidth + shoulderWidth + offset;
+  const postHeight = Math.max(2.2, Number(options.postHeight) || 4.8);
+  const postRadius = Math.max(0.05, Number(options.postRadius) || 0.11);
+  const headWidth = Math.max(0.25, Number(options.headWidth) || 0.56);
+  const headHeight = Math.max(0.12, Number(options.headHeight) || 0.24);
+  const headDepth = Math.max(0.12, Number(options.headDepth) || 0.24);
+  const instanceCount = lampCount * 2;
+
+  const postGeometry = new THREE.CylinderGeometry(postRadius, postRadius, postHeight, 6, 1, false);
+  const headGeometry = new THREE.BoxGeometry(headWidth, headHeight, headDepth);
+  const postMaterial =
+    options.postMaterial ||
+    new THREE.MeshStandardMaterial({
+      color: 0x798491,
+      roughness: 0.84,
+      metalness: 0.2
+    });
+  const headMaterial =
+    options.headMaterial ||
+    new THREE.MeshStandardMaterial({
+      color: 0xffe8b0,
+      emissive: 0x4f3a15,
+      emissiveIntensity: 0.35,
+      roughness: 0.52,
+      metalness: 0.06
+    });
+
+  const postMesh = new THREE.InstancedMesh(postGeometry, postMaterial, instanceCount);
+  postMesh.name = options.postName || "race-lamp-posts";
+  postMesh.castShadow = false;
+  postMesh.receiveShadow = true;
+
+  const headMesh = new THREE.InstancedMesh(headGeometry, headMaterial, instanceCount);
+  headMesh.name = options.headName || "race-lamp-heads";
+  headMesh.castShadow = false;
+  headMesh.receiveShadow = true;
+
+  const frame = {};
+  const matrix = new THREE.Matrix4();
+  const scale = new THREE.Vector3(1, 1, 1);
+  const rotation = new THREE.Quaternion();
+  let writeIndex = 0;
+
+  for (let index = 0; index < lampCount; index += 1) {
+    const alpha = lampCount <= 1 ? 0 : index / (lampCount - 1);
+    const progress = 0.04 + alpha * 0.92;
+    sampleCurveFrame(curve, progress, frame);
+    const yaw = Math.atan2(frame.tangent.x, frame.tangent.z);
+    rotation.setFromEuler(new THREE.Euler(0, yaw, 0, "YXZ"));
+    for (const side of [-1, 1]) {
+      const jitter = (Math.sin((index + 1) * 1.713 + side * 0.43) * 0.5) * 0.42;
+      const baseX = frame.point.x + frame.normal.x * (lateralOffset * side + jitter);
+      const baseZ = frame.point.z + frame.normal.z * (lateralOffset * side + jitter);
+      const baseY = frame.point.y;
+
+      matrix.compose(new THREE.Vector3(baseX, baseY + postHeight * 0.5, baseZ), rotation, scale);
+      postMesh.setMatrixAt(writeIndex, matrix);
+
+      matrix.compose(
+        new THREE.Vector3(
+          baseX + frame.normal.x * side * 0.22,
+          baseY + postHeight - headHeight * 0.5,
+          baseZ + frame.normal.z * side * 0.22
+        ),
+        rotation,
+        scale
+      );
+      headMesh.setMatrixAt(writeIndex, matrix);
+      writeIndex += 1;
+    }
+  }
+
+  postMesh.instanceMatrix.needsUpdate = true;
+  headMesh.instanceMatrix.needsUpdate = true;
+
+  const group = new THREE.Group();
+  group.name = options.groupName || "race-lamp-group";
+  group.add(postMesh, headMesh);
+  return group;
+}
+
+function buildTrackSignInstances(curve, options = {}) {
+  const signCount = Math.max(8, Math.trunc(Number(options.signCount) || 24));
+  const halfWidth = Math.max(2, Number(options.halfWidth) || 7.6);
+  const shoulderWidth = Math.max(0.4, Number(options.shoulderWidth) || 1.1);
+  const offset = Math.max(0.6, Number(options.signOffset) || 3.4);
+  const lateralOffset = halfWidth + shoulderWidth + offset;
+  const poleHeight = Math.max(1.2, Number(options.poleHeight) || 2.5);
+  const poleRadius = Math.max(0.04, Number(options.poleRadius) || 0.08);
+  const panelWidth = Math.max(0.6, Number(options.panelWidth) || 1.6);
+  const panelHeight = Math.max(0.4, Number(options.panelHeight) || 0.92);
+  const panelDepth = Math.max(0.05, Number(options.panelDepth) || 0.09);
+  const instanceCount = signCount * 2;
+
+  const poleGeometry = new THREE.CylinderGeometry(poleRadius, poleRadius, poleHeight, 6, 1, false);
+  const panelGeometry = new THREE.BoxGeometry(panelWidth, panelHeight, panelDepth);
+  const poleMaterial =
+    options.poleMaterial ||
+    new THREE.MeshStandardMaterial({
+      color: 0x5c6269,
+      roughness: 0.86,
+      metalness: 0.08
+    });
+  const panelMaterial =
+    options.panelMaterial ||
+    new THREE.MeshStandardMaterial({
+      color: 0x3f7ca7,
+      roughness: 0.75,
+      metalness: 0.02
+    });
+
+  const poleMesh = new THREE.InstancedMesh(poleGeometry, poleMaterial, instanceCount);
+  poleMesh.name = options.poleName || "race-sign-poles";
+  poleMesh.castShadow = false;
+  poleMesh.receiveShadow = true;
+
+  const panelMesh = new THREE.InstancedMesh(panelGeometry, panelMaterial, instanceCount);
+  panelMesh.name = options.panelName || "race-sign-panels";
+  panelMesh.castShadow = false;
+  panelMesh.receiveShadow = true;
+
+  const frame = {};
+  const matrix = new THREE.Matrix4();
+  const scale = new THREE.Vector3(1, 1, 1);
+  const rotation = new THREE.Quaternion();
+  const centerDirection = new THREE.Vector3();
+  let writeIndex = 0;
+
+  for (let index = 0; index < signCount; index += 1) {
+    const alpha = signCount <= 1 ? 0 : index / (signCount - 1);
+    const progress = 0.06 + alpha * 0.88;
+    sampleCurveFrame(curve, progress, frame);
+    for (const side of [-1, 1]) {
+      const jitter = (Math.sin((index + 1) * 2.011 + side * 1.07) * 0.5) * 0.5;
+      const baseX = frame.point.x + frame.normal.x * (lateralOffset * side + jitter);
+      const baseZ = frame.point.z + frame.normal.z * (lateralOffset * side + jitter);
+      const baseY = frame.point.y;
+
+      matrix.compose(new THREE.Vector3(baseX, baseY + poleHeight * 0.5, baseZ), rotation, scale);
+      poleMesh.setMatrixAt(writeIndex, matrix);
+
+      centerDirection.copy(frame.normal).multiplyScalar(-side);
+      const panelYaw = Math.atan2(centerDirection.x, centerDirection.z);
+      rotation.setFromEuler(new THREE.Euler(0, panelYaw, 0, "YXZ"));
+      matrix.compose(
+        new THREE.Vector3(
+          baseX + centerDirection.x * 0.08,
+          baseY + poleHeight - panelHeight * 0.5,
+          baseZ + centerDirection.z * 0.08
+        ),
+        rotation,
+        scale
+      );
+      panelMesh.setMatrixAt(writeIndex, matrix);
+      writeIndex += 1;
+    }
+  }
+
+  poleMesh.instanceMatrix.needsUpdate = true;
+  panelMesh.instanceMatrix.needsUpdate = true;
+
+  const group = new THREE.Group();
+  group.name = options.groupName || "race-sign-group";
+  group.add(poleMesh, panelMesh);
+  return group;
 }
 
 export function buildRoadMeshesFromCenterline(track = CAR_RACE_TRACK_BLUEPRINT, options = {}) {
@@ -218,6 +400,24 @@ export function buildRoadMeshesFromCenterline(track = CAR_RACE_TRACK_BLUEPRINT, 
       material: options.guardrailMaterial
     });
     group.add(guardrailPosts);
+  }
+
+  if (options.enableLampPosts !== false) {
+    const lampPosts = buildLampPostInstances(baseCurve, {
+      lampCount: options.lampPostCount || perf.lampPostCount || 56,
+      halfWidth: Number(options.baseHalfWidth) || Number(road.baseHalfWidth) || 7.6,
+      shoulderWidth: Number(road.shoulderWidth) || 1.1
+    });
+    group.add(lampPosts);
+  }
+
+  if (options.enableTrackSigns !== false) {
+    const signs = buildTrackSignInstances(baseCurve, {
+      signCount: options.signCount || perf.signCount || 24,
+      halfWidth: Number(options.baseHalfWidth) || Number(road.baseHalfWidth) || 7.6,
+      shoulderWidth: Number(road.shoulderWidth) || 1.1
+    });
+    group.add(signs);
   }
 
   return {
