@@ -683,6 +683,7 @@ export class GameRuntime {
       return;
     }
     this.chatControlsEl?.classList.remove("hidden");
+    this.syncChatMuteUi();
     this.chatUiEl.classList.toggle("mobile-chat-hidden", this.mobileEnabled && !this.chatOpen);
     this.updateMobileChatToggleState();
 
@@ -840,6 +841,19 @@ export class GameRuntime {
     }
   }
 
+  syncChatMuteUi({ announce = false } = {}) {
+    const muted = this.chatMuted === true;
+    if (this.chatInputEl) {
+      this.chatInputEl.disabled = muted;
+    }
+    if (this.chatSendBtnEl) {
+      this.chatSendBtnEl.disabled = muted;
+    }
+    if (announce) {
+      this.appendChatLine({ text: muted ? "채팅이 제한되었습니다." : "채팅 제한이 해제되었습니다." }, { system: true });
+    }
+  }
+
   sendChatMessage() {
     if (!this.socket || !this.networkConnected || this.chatMuted) {
       return;
@@ -877,6 +891,7 @@ export class GameRuntime {
       this.assignedSeat = null;
       this.manualBoardInFlight = false;
       this.chatMuted = false;
+      this.syncChatMuteUi();
       this.chatUnreadCount = 0;
       this.updateMobileChatToggleState();
       this.setSystemStatus(`Connected to ${this.socketEndpoint}`);
@@ -894,6 +909,7 @@ export class GameRuntime {
       this.assignedSeat = null;
       this.manualBoardInFlight = false;
       this.chatMuted = false;
+      this.syncChatMuteUi();
       this.chatUnreadCount = 0;
       this.updateMobileChatToggleState();
       this.currentRoomCode = "";
@@ -985,16 +1001,7 @@ export class GameRuntime {
     });
     this.socket.on("host:chat-muted", (payload = {}) => {
       this.chatMuted = payload?.muted === true;
-      if (this.chatInputEl) {
-        this.chatInputEl.disabled = this.chatMuted;
-      }
-      if (this.chatSendBtnEl) {
-        this.chatSendBtnEl.disabled = this.chatMuted;
-      }
-      this.appendChatLine(
-        { text: this.chatMuted ? "채팅이 제한되었습니다." : "채팅 제한이 해제되었습니다." },
-        { system: true }
-      );
+      this.syncChatMuteUi({ announce: true });
     });
   }
 

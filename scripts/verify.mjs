@@ -168,6 +168,8 @@ async function checkSocketServer() {
 
     let roomPlayerCount = 0;
     let receivedSync = false;
+    let receivedChat = false;
+    const smokeChatText = `smoke-chat-${Date.now()}`;
 
     c2.on("player:sync", (payload) => {
       if (payload?.id === c1.id && Number.isFinite(payload?.state?.x)) {
@@ -186,6 +188,11 @@ async function checkSocketServer() {
         }
       }
     });
+    c2.on("chat:message", (payload = {}) => {
+      if (String(payload?.id ?? "") === String(c1.id ?? "") && String(payload?.text ?? "") === smokeChatText) {
+        receivedChat = true;
+      }
+    });
 
     c1.on("room:list", (rooms) => {
       const first = Array.isArray(rooms) ? rooms[0] : null;
@@ -201,7 +208,11 @@ async function checkSocketServer() {
     });
     c1.emit("room:list");
 
+    const chatAck = await emitAck(c1, "chat:send", { text: smokeChatText });
+    assert(chatAck?.ok === true, `chat:send failed: ${JSON.stringify(chatAck)}`);
+
     await waitFor(() => receivedSync, 5000);
+    await waitFor(() => receivedChat, 5000);
     await waitFor(() => roomPlayerCount >= 2, 5000);
 
     let controller = c1;
