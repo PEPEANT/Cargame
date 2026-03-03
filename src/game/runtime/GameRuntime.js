@@ -638,6 +638,11 @@ export class GameRuntime {
       this.socket.emit("room:list");
     });
 
+    this.socket.on("connect_error", (error) => {
+      const reason = String(error?.message ?? "network error").trim();
+      this.setSystemStatus(`Connect failed: ${reason}`);
+    });
+
     this.socket.on("disconnect", () => {
       this.networkConnected = false;
       this.raceProgress = { lap: 0, progress: 0, offTrack: false, updatedAt: Date.now() };

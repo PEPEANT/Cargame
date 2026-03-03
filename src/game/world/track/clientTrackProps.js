@@ -3,6 +3,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { CAR_RACE_TRACK_BLUEPRINT, getTrackPropPack } from "./trackBlueprint.js";
 
 const LOADER = new GLTFLoader();
+const missingPrefabWarnings = new Set();
 
 const DEFAULT_LAYOUT = Object.freeze([
   {
@@ -284,7 +285,16 @@ export async function buildTrackPropInstancesFromPack(track = CAR_RACE_TRACK_BLU
       const mesh = buildInstancedPrefabMesh(source, curve, entry, visibility);
       mesh.userData.prefabKey = key;
       group.add(mesh);
-    } catch {
+    } catch (error) {
+      const warnKey = `${key}:${fileName}`;
+      if (!missingPrefabWarnings.has(warnKey) && typeof console !== "undefined" && typeof console.warn === "function") {
+        missingPrefabWarnings.add(warnKey);
+        console.warn(
+          `[track-props] failed to load prefab "${fileName}" for key "${key}" from ${pack.rootUrl}: ${
+            String(error?.message ?? error)
+          }`
+        );
+      }
       // Skip missing or malformed assets; road generation must remain stable.
     }
   }
