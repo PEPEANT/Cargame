@@ -21,6 +21,14 @@ import {
   judgeProgressTransition,
   validateTrackForProgress
 } from "./src/server/race/progressJudge.js";
+import {
+  clearRoomVehiclePhysics,
+  getRapierVehiclePhysicsRuntime,
+  getRoomVehiclePhysicsTelemetry,
+  sampleRoomVehicleStates,
+  stepRoomVehiclePhysics,
+  syncRoomVehiclePhysicsAssignments
+} from "./src/server/race/rapierVehiclePhysics.js";
 
 function parseCorsOrigins(rawValue) {
   const value = String(rawValue ?? "").trim();
@@ -2093,6 +2101,7 @@ function tickRooms() {
     if (!room || room.players.size === 0) {
       continue;
     }
+    stepRoomVehiclePhysics(room.code, 1 / SERVER_TICK_RATE);
     emitRoomDeltaSnapshot(room);
   }
 }
@@ -2482,6 +2491,7 @@ function dispatchRoomSeatAssignments(room, reason = "seat-update") {
   clearRaceSeatTimer(race);
   const sessionDraft = buildRoomRaceSessionDraft(room, { includeWaiting: false });
   const assignments = Array.isArray(sessionDraft?.seatAssignments) ? sessionDraft.seatAssignments : [];
+  syncRoomVehiclePhysicsAssignments(room.code, sessionDraft);
   if (assignments.length <= 0) {
     return;
   }
@@ -2783,6 +2793,7 @@ function serializeRoom(room) {
   const gate = ensureRoomEntryGate(room);
   const billboardMedia = ensureRoomBillboardMedia(room);
   const priorityQueue = normalizeEntryGateQueueIds(room, gate.nextPriorityIds);
+  const vehiclePhysics = getRoomVehiclePhysicsTelemetry(room.code);
   return {
     code: room.code,
     hostId: room.hostId,
@@ -2833,7 +2844,15 @@ function serializeRoom(room) {
       centerlinePointCount: TRACK_CENTERLINE_POINTS.length,
       colliderSegmentCount: Number(TRACK_COLLIDER_LAYOUT?.segmentCount || 0),
       boundaryEnabled: TRACK_BOUNDARY.enabled === true,
-      antiCheatEnabled: TRACK_ANTICHEAT_ENABLED
+      antiCheatEnabled: TRACK_ANTICHEAT_ENABLED,
+      physics: {
+        engine: String(ACTIVE_TRACK_BLUEPRINT?.physicsPolicy?.engine ?? "none"),
+        ready: vehiclePhysics?.ready === true,
+        vehicleCount: Number(vehiclePhysics?.vehicleCount || 0),
+        fixedStepSeconds: Number(vehiclePhysics?.fixedStepSeconds || 0),
+        lastStepAt: Number(vehiclePhysics?.lastStepAt || 0),
+        lastSyncAt: Number(vehiclePhysics?.lastSyncAt || 0)
+      }
     }
   };
 }
@@ -3105,6 +3124,8 @@ function buildraceEndPayload(room, reason = "finished") {
 
 function buildraceConfigPayload(room) {
   const config = ensureRoomraceConfig(room);
+  const vehiclePhysics = getRoomVehiclePhysicsTelemetry(room.code);
+  const vehicleSample = sampleRoomVehicleStates(room.code, { limit: 8 });
   return {
     seatMode: String(config?.seatMode ?? TRACK_SEAT_DEFAULT_MODE).toLowerCase() === "manual" ? "manual" : "auto",
     endPolicy: {
@@ -3145,6 +3166,15 @@ function buildraceConfigPayload(room) {
         wrongWayStrikes: TRACK_ANTICHEAT_RESET_WRONG_WAY_STRIKES,
         cuttingStrikes: TRACK_ANTICHEAT_RESET_CUTTING_STRIKES,
         resetCooldownMs: TRACK_ANTICHEAT_RESET_COOLDOWN_MS
+      },
+      physics: {
+        engine: String(ACTIVE_TRACK_BLUEPRINT?.physicsPolicy?.engine ?? "none"),
+        ready: vehiclePhysics?.ready === true,
+        vehicleCount: Number(vehiclePhysics?.vehicleCount || 0),
+        fixedStepSeconds: Number(vehiclePhysics?.fixedStepSeconds || 0),
+        lastStepAt: Number(vehiclePhysics?.lastStepAt || 0),
+        lastSyncAt: Number(vehiclePhysics?.lastSyncAt || 0),
+        sample: vehicleSample
       }
     }
   };
@@ -3472,6 +3502,7 @@ function pruneRoomPlayers(room) {
       rememberRoomraceConfig(room);
       clearEntryAdmissionTimer(room);
       resetraceState(room);
+      clearRoomVehiclePhysics(room.code);
       rooms.delete(room.code);
     }
   }
@@ -3512,6 +3543,7 @@ function leaveCurrentRoom(socket) {
     rememberRoomraceConfig(room);
     clearEntryAdmissionTimer(room);
     resetraceState(room);
+    clearRoomVehiclePhysics(room.code);
     rooms.delete(room.code);
   }
 
@@ -4679,9 +4711,15 @@ httpServer.on("error", (error) => {
 });
 
 httpServer.listen(PORT, () => {
+  const rapierRuntime = getRapierVehiclePhysicsRuntime();
   console.log(`Chat server running on http://localhost:${PORT}`);
   console.log(
     `[track] ${String(ACTIVE_TRACK_BLUEPRINT?.id ?? "car-race-alpha-track")} progress=${TRACK_PROGRESS_READY ? "ready" : "invalid"} checkpoints=${TRACK_CHECKPOINT_PROGRESS_VALUES.length} centerline=${TRACK_CENTERLINE_POINTS.length} colliders=${Number(TRACK_COLLIDER_LAYOUT?.segmentCount || 0)}`
+  );
+  console.log(
+    `[physics] engine=${String(ACTIVE_TRACK_BLUEPRINT?.physicsPolicy?.engine ?? "none")} ready=${
+      rapierRuntime.ready ? "yes" : "no"
+    } rooms=${Number(rapierRuntime.roomCount || 0)}`
   );
   if (WORKER_SINGLE_ROOM_MODE) {
     console.log(
